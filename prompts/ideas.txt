@@ -1,0 +1,9 @@
+First feature and proof of concept:
+I will do keyboard switch price comparisons across multiple website, checking sales and the normal prices
+Second features:
+Group buy dashboard that tracks the status of different group buys across multiple websites
+    Live active GB
+    Ended, when they ended and esitmated shipping date
+    Extras go Live
+third feature:
+in stock keyboard tracker

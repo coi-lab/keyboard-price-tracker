@@ -2,7 +2,7 @@ import sqlite3
 from pathlib import Path
 
 
-DB_PATH = Path(__file__).with_name("mech_key_watcher.db")
+DB_PATH = Path(__file__).with_name("switch_prices.db")
 
 
 SCHEMA = """
@@ -11,29 +11,31 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS Keyboard_Items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    brand TEXT NOT NULL,
-    retail_price REAL NOT NULL CHECK (retail_price >= 0)
+    brand TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS Price_History (
+CREATE TABLE IF NOT EXISTS Vendor_Listings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     item_id INTEGER NOT NULL,
-    aftermarket_price REAL NOT NULL CHECK (aftermarket_price >= 0),
-    date_recorded TEXT NOT NULL,
+    vendor_name TEXT NOT NULL,
+    retail_price REAL NOT NULL CHECK (retail_price >= 0),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price REAL NOT NULL CHECK (unit_price >= 0),
     source_url TEXT,
+    date_updated TEXT NOT NULL,
 
-    -- Each price history row belongs to one keyboard item.
-    -- Deleting a keyboard item also removes its related price records.
+    -- Each vendor listing row belongs to one keyboard item.
+    -- Deleting a keyboard item also removes its related vendor listings.
     FOREIGN KEY (item_id)
         REFERENCES Keyboard_Items (id)
         ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_price_history_item_id
-    ON Price_History (item_id);
+CREATE INDEX IF NOT EXISTS idx_vendor_listings_item_id
+    ON Vendor_Listings (item_id);
 
-CREATE INDEX IF NOT EXISTS idx_price_history_date_recorded
-    ON Price_History (date_recorded);
+CREATE INDEX IF NOT EXISTS idx_vendor_listings_date_updated
+    ON Vendor_Listings (date_updated);
 """
 
 

@@ -15,18 +15,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.core_engine import initialize_database, save_item_data
+from core.core_engine import USER_AGENT, clean_text, fetch_html, initialize_database, save_item_data
 
 
 BASE_URL = "https://kbdfans.com"
 COLLECTION_URL = f"{BASE_URL}/collections/switches"
 DEFAULT_BRAND = "KBDFans"
-REQUEST_TIMEOUT = 20
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/125.0 Safari/537.36"
-)
+VENDOR_NAME = "KBDFans"
 
 
 @dataclass(frozen=True)
@@ -34,6 +29,7 @@ class Product:
     name: str
     brand: str
     retail_price: Decimal
+    quantity: int
     source_url: str
 
 
@@ -51,7 +47,7 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
         page_url = build_page_url(page)
         print(f"Fetching page {page}: {page_url}")
 
-        html = fetch_html(session, page_url)
+        html = fetch_html(page_url, session)
         products = list(parse_products(html))
 
         if not products:
@@ -68,11 +64,13 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
             item_id = save_item_data(
                 name=product.name,
                 brand=product.brand,
+                vendor_name=VENDOR_NAME,
                 retail_price=float(product.retail_price),
                 source_url=product.source_url,
+                quantity=product.quantity,
             )
             saved_count += 1
-            print(f"Saved #{item_id}: {product.name} - ${product.retail_price}")
+            print(f"Saved #{item_id}: {product.name} - ${product.retail_price} / {product.quantity}")
 
         if not has_next_page(html, page):
             print(f"No next-page link found after page {page}. Stopping.")
@@ -86,15 +84,6 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
 
 def build_page_url(page: int) -> str:
     return f"{COLLECTION_URL}?page={page}"
-
-
-def fetch_html(session: requests.Session, url: str) -> str:
-    try:
-        response = session.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        return response.text
-    except requests.RequestException as error:
-        raise RuntimeError(f"Could not fetch {url}: {error}") from error
 
 
 def parse_products(html: str) -> Iterable[Product]:
@@ -164,6 +153,7 @@ def parse_product_card(card) -> Optional[Product]:
         name=clean_text(name),
         brand=extract_brand(card) or infer_brand(name),
         retail_price=price,
+        quantity=infer_quantity(f"{name} {card.get_text(' ', strip=True)}"),
         source_url=source_url,
     )
 
@@ -268,6 +258,24 @@ def parse_prices(text: str) -> list[Decimal]:
     return prices
 
 
+def infer_quantity(text: str) -> int:
+    patterns = [
+        r"\bx\s*(\d+)\b",
+        r"\((\d+)\)",
+        r"\b(\d+)\s*(?:pcs|pieces|switches)\b",
+        r"\bpack\s*of\s*(\d+)\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            quantity = int(match.group(1))
+            if quantity > 0:
+                return quantity
+
+    return 1
+
+
 def has_next_page(html: str, current_page: int) -> bool:
     soup = BeautifulSoup(html, "html.parser")
     next_link = soup.select_one('a[rel="next"], a.pagination__next, a[href*="page="]')
@@ -278,10 +286,6 @@ def has_next_page(html: str, current_page: int) -> bool:
             return int(next_page_match.group(1)) > current_page
 
     return bool(soup.select_one(f'a[href*="page={current_page + 1}"]'))
-
-
-def clean_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
 
 
 def class_text(tag) -> str:

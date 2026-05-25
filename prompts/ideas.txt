@@ -1,5 +1,10 @@
 First feature and proof of concept:
 I will do keyboard switch price comparisons across multiple website, checking sales and the normal prices
+    Within this idea, we can find the cheapest landing cost item price + shipping cost
+    Adding watchlists with account to give notifications
+    looking into aftermarcket pricing on r/mechmarket and ebay
+    stock market style graph in historical graph for items
+    
 Second features:
 Group buy dashboard that tracks the status of different group buys across multiple websites
     Live active GB

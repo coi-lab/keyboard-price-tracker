@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MechKeyWatcher</title>
+  <style>
+    :root {
+      --page: #f4f4f2;
+      --panel: #ffffff;
+      --panel-muted: #f7f7f6;
+      --ink: #101010;
+      --muted: #626262;
+      --line: #d8d8d4;
+      --black: #050505;
+      --white: #ffffff;
+      --purple-950: #13091f;
+      --purple-900: #1c0d2e;
+      --purple-850: #26133d;
+      --purple-700: #56337e;
+      --purple-300: #d9c8f0;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--page);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: minmax(132px, 16%) minmax(420px, 49%) minmax(300px, 35%);
+      gap: 10px;
+      height: 100vh;
+      padding: 10px;
+      overflow: hidden;
+    }
+
+    .sidebar,
+    .switch-list-panel,
+    .detail-panel {
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: none;
+    }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+    }
+
+    .brand-lockup {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 22px;
+    }
+
+    .brand-avatar,
+    .vendor-avatar {
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--black);
+      color: var(--white);
+      font-weight: 800;
+    }
+
+    .brand-avatar {
+      width: 34px;
+      height: 34px;
+      font-size: 12px;
+    }
+
+    .brand-title {
+      margin: 0;
+      font-size: 15px;
+      line-height: 1;
+    }
+
+    .brand-subtitle {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .nav-link {
+      display: block;
+      margin-bottom: 6px;
+      padding: 10px 11px;
+      border-radius: 6px;
+      color: var(--ink);
+      text-decoration: none;
+      background: var(--panel-muted);
+      font-size: 13px;
+    }
+
+    .nav-link.active,
+    .nav-link:hover {
+      background: var(--black);
+      color: var(--white);
+    }
+
+    .switch-list-panel {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .search-header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 14px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .search-header h1 {
+      margin: 0 0 10px;
+      font-size: 18px;
+      line-height: 1.15;
+    }
+
+    .controls-row {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(160px, 220px);
+      gap: 8px;
+    }
+
+    .search-input,
+    .sort-select {
+      width: 100%;
+      height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--white);
+      color: var(--ink);
+      padding: 0 10px;
+      outline: none;
+      font-size: 13px;
+    }
+
+    .sort-select {
+      cursor: pointer;
+    }
+
+    .search-input:focus,
+    .sort-select:focus {
+      border-color: var(--black);
+      box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.12);
+    }
+
+    .switch-list {
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      padding: 10px;
+      overflow-y: auto;
+      list-style: none;
+    }
+
+    .switch-item {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--white);
+      color: var(--ink);
+      padding: 9px 10px;
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 140ms ease, background 140ms ease;
+    }
+
+    .switch-item:hover,
+    .switch-item.active {
+      border-color: var(--black);
+      background: var(--panel-muted);
+    }
+
+    .switch-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .switch-actions {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+
+    .switch-name {
+      margin: 0;
+      font-size: 13px;
+      line-height: 1.25;
+    }
+
+    .switch-brand,
+    .switch-meta {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .price-chip {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: var(--black);
+      color: var(--white);
+      padding: 5px 8px;
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .sold-out-tag {
+      display: inline-flex;
+      align-items: center;
+      width: max-content;
+      border-radius: 999px;
+      background: #ffea00;
+      color: #111111;
+      padding: 4px 7px;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .switch-list-row.sold-out-row .switch-item {
+      color: #5f5f5f;
+      background: #eeeeec;
+      border-color: #c9c9c5;
+    }
+
+    .pin-button {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--white);
+      color: var(--ink);
+      cursor: pointer;
+      line-height: 1;
+    }
+
+    .pin-button:hover,
+    .pin-button.active {
+      border-color: var(--black);
+      background: var(--black);
+      color: var(--white);
+    }
+
+    .detail-panel {
+      padding: 0;
+      overflow: hidden;
+      background: var(--purple-950);
+      border-color: var(--purple-700);
+    }
+
+    .detail-card {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      border-radius: 8px;
+      background: var(--purple-900);
+      color: var(--white);
+      opacity: 0;
+      transform: translateX(14px);
+      pointer-events: none;
+      transition: opacity 180ms ease, transform 180ms ease;
+      overflow: hidden;
+    }
+
+    .detail-card.open {
+      opacity: 1;
+      transform: translateX(0);
+      pointer-events: auto;
+    }
+
+    .empty-state {
+      height: 100%;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--purple-900);
+      color: var(--purple-300);
+      text-align: center;
+      padding: 18px;
+    }
+
+    .detail-header {
+      padding: 16px;
+      border-bottom: 1px solid rgba(217, 200, 240, 0.18);
+      background: var(--purple-850);
+    }
+
+    .detail-title {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.15;
+    }
+
+    .detail-brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      color: var(--purple-300);
+      font-size: 12px;
+    }
+
+    .vendor-avatar {
+      width: 24px;
+      height: 24px;
+      background: var(--purple-300);
+      color: var(--purple-950);
+      font-size: 10px;
+    }
+
+    .listings {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      overflow-y: auto;
+    }
+
+    .vendor-card {
+      border: 1px solid rgba(217, 200, 240, 0.18);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 10px;
+    }
+
+    .vendor-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .vendor-name {
+      margin: 0;
+      font-size: 13px;
+    }
+
+    .vendor-date {
+      margin: 4px 0 0;
+      color: var(--purple-300);
+      font-size: 11px;
+    }
+
+    .vendor-heading {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+    }
+
+    .vendor-price {
+      text-align: right;
+      font-weight: 800;
+      color: var(--white);
+      font-size: 13px;
+    }
+
+    .vendor-price small {
+      display: block;
+      margin-top: 3px;
+      color: var(--purple-300);
+      font-weight: 500;
+      font-size: 11px;
+    }
+
+    .vendor-link {
+      display: inline-flex;
+      justify-content: center;
+      margin-top: 9px;
+      min-height: 32px;
+      align-items: center;
+      border-radius: 6px;
+      background: var(--purple-300);
+      color: var(--purple-950);
+      padding: 7px 10px;
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .vendor-link:hover {
+      background: var(--white);
+    }
+
+    #price-history-chart {
+      min-height: 64px;
+      margin: 0 10px 10px;
+      border: 1px dashed rgba(217, 200, 240, 0.28);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    @media (max-width: 760px) {
+      .app-shell {
+        grid-template-columns: 1fr;
+        height: auto;
+        min-height: 100vh;
+        overflow: visible;
+      }
+
+      .controls-row {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        min-height: auto;
+      }
+
+      .switch-list-panel,
+      .detail-panel {
+        min-height: 420px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="brand-lockup">
+        <div class="brand-avatar">MK</div>
+        <div>
+          <p class="brand-title">MechKeyWatcher</p>
+          <p class="brand-subtitle">Switch price tracker</p>
+        </div>
+      </div>
+      <nav aria-label="Primary">
+        <a class="nav-link active" href="/">Home</a>
+        <a class="nav-link" href="#">Trends</a>
+        <a class="nav-link" href="#">Settings</a>
+      </nav>
+    </aside>
+
+    <section class="switch-list-panel" aria-label="Switch list">
+      <header class="search-header">
+        <h1>Switches</h1>
+        <div class="controls-row">
+          <input id="search-input" class="search-input" type="search" placeholder="Search switches or brands" autocomplete="off">
+          <select id="sort-select" class="sort-select" aria-label="Sort switches">
+            <option value="name">Name</option>
+            <option value="price-asc">Lowest price</option>
+            <option value="price-desc">Highest price</option>
+            <option value="vendors-desc">Most vendors</option>
+          </select>
+        </div>
+      </header>
+
+      <ul id="switch-list" class="switch-list">
+        {% for switch in switches %}
+          <li
+            class="switch-list-row {% if not switch.is_available %}sold-out-row{% endif %}"
+            data-search="{{ (switch.name ~ ' ' ~ switch.brand)|lower }}"
+            data-name="{{ switch.name|lower }}"
+            data-price="{% if switch.lowest_unit_price is not none %}{{ switch.lowest_unit_price }}{% else %}999999{% endif %}"
+            data-has-price="{% if switch.lowest_unit_price is not none %}true{% else %}false{% endif %}"
+            data-vendors="{{ switch.listing_count or 0 }}"
+            data-available="{% if switch.is_available %}true{% else %}false{% endif %}"
+            data-pinned="false"
+            data-switch-id="{{ switch.id }}"
+          >
+            <div class="switch-item" role="button" tabindex="0" data-switch-id="{{ switch.id }}">
+              <div class="switch-row">
+                <div>
+                  <p class="switch-name">{{ switch.name }}</p>
+                  <p class="switch-brand">{{ switch.brand }}</p>
+                  <p class="switch-meta">{{ switch.listing_count or 0 }} listings</p>
+                  {% if not switch.is_available %}
+                    <span class="sold-out-tag">Sold out</span>
+                  {% endif %}
+                </div>
+                <span class="switch-actions">
+                  <span class="price-chip">
+                    {% if switch.lowest_unit_price is not none %}
+                      ${{ "%.2f"|format(switch.lowest_unit_price) }}/ea
+                    {% else %}
+                      No price
+                    {% endif %}
+                  </span>
+                  <span
+                    class="pin-button"
+                    role="button"
+                    tabindex="0"
+                    data-pin-button
+                    aria-label="Pin {{ switch.name }}"
+                    aria-pressed="false"
+                    title="Pin to top"
+                  >P</span>
+                </span>
+              </div>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+
+    <aside class="detail-panel" aria-label="Switch details">
+      <div id="empty-state" class="empty-state">
+        <p>Select a switch to compare vendor prices.</p>
+      </div>
+
+      <article id="detail-card" class="detail-card" aria-live="polite">
+        <header class="detail-header">
+          <h2 id="detail-title" class="detail-title"></h2>
+          <div class="detail-brand">
+            <span id="detail-avatar" class="vendor-avatar"></span>
+            <span id="detail-brand"></span>
+          </div>
+        </header>
+        <div id="detail-listings" class="listings"></div>
+        <div id="price-history-chart"></div>
+      </article>
+    </aside>
+  </main>
+
+  <script>
+    const searchInput = document.querySelector("#search-input");
+    const sortSelect = document.querySelector("#sort-select");
+    const switchList = document.querySelector("#switch-list");
+    const rows = Array.from(document.querySelectorAll(".switch-list-row"));
+    const buttons = Array.from(document.querySelectorAll(".switch-item"));
+    const pinButtons = Array.from(document.querySelectorAll("[data-pin-button]"));
+    const emptyState = document.querySelector("#empty-state");
+    const detailCard = document.querySelector("#detail-card");
+    const detailTitle = document.querySelector("#detail-title");
+    const detailBrand = document.querySelector("#detail-brand");
+    const detailAvatar = document.querySelector("#detail-avatar");
+    const detailListings = document.querySelector("#detail-listings");
+    const pinnedSwitches = new Set(JSON.parse(localStorage.getItem("pinnedSwitches") || "[]"));
+
+    const money = new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD"
+    });
+
+    searchInput.addEventListener("input", () => {
+      filterRows();
+    });
+
+    sortSelect.addEventListener("change", () => {
+      sortRows();
+      filterRows();
+    });
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", async () => {
+        await selectSwitch(button);
+      });
+
+      button.addEventListener("keydown", async (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
+        }
+
+        event.preventDefault();
+        await selectSwitch(button);
+      });
+    });
+
+    pinButtons.forEach((button) => {
+      const row = button.closest(".switch-list-row");
+      const id = row.dataset.switchId;
+      setPinnedState(row, button, pinnedSwitches.has(id));
+
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        togglePin(row, button);
+      });
+
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        togglePin(row, button);
+      });
+    });
+
+    sortRows();
+    filterRows();
+
+    function filterRows() {
+      const query = searchInput.value.trim().toLowerCase();
+      rows.forEach((row) => {
+        row.classList.toggle("hidden", !row.dataset.search.includes(query));
+      });
+    }
+
+    function togglePin(row, button) {
+      const shouldPin = row.dataset.pinned !== "true";
+      setPinnedState(row, button, shouldPin);
+      syncPinnedStorage();
+      sortRows();
+      filterRows();
+    }
+
+    function setPinnedState(row, button, isPinned) {
+      row.dataset.pinned = String(isPinned);
+      button.classList.toggle("active", isPinned);
+      button.setAttribute("aria-pressed", String(isPinned));
+      button.setAttribute("title", isPinned ? "Unpin" : "Pin to top");
+      button.textContent = isPinned ? "UP" : "P";
+
+      if (isPinned) {
+        pinnedSwitches.add(row.dataset.switchId);
+      } else {
+        pinnedSwitches.delete(row.dataset.switchId);
+      }
+    }
+
+    function syncPinnedStorage() {
+      localStorage.setItem("pinnedSwitches", JSON.stringify([...pinnedSwitches]));
+    }
+
+    function sortRows() {
+      const sorted = [...rows].sort(compareRows);
+      sorted.forEach((row) => switchList.appendChild(row));
+    }
+
+    function compareRows(a, b) {
+      const pinnedDifference = Number(b.dataset.pinned === "true") - Number(a.dataset.pinned === "true");
+      if (pinnedDifference !== 0) {
+        return pinnedDifference;
+      }
+
+      const availabilityDifference = Number(b.dataset.available === "true") - Number(a.dataset.available === "true");
+      if (availabilityDifference !== 0) {
+        return availabilityDifference;
+      }
+
+      if (sortSelect.value === "price-asc") {
+        return comparePriceAvailability(a, b) || Number(a.dataset.price) - Number(b.dataset.price) || compareName(a, b);
+      }
+
+      if (sortSelect.value === "price-desc") {
+        return comparePriceAvailability(a, b) || Number(b.dataset.price) - Number(a.dataset.price) || compareName(a, b);
+      }
+
+      if (sortSelect.value === "vendors-desc") {
+        return Number(b.dataset.vendors) - Number(a.dataset.vendors) || compareName(a, b);
+      }
+
+      return compareName(a, b);
+    }
+
+    function compareName(a, b) {
+      return a.dataset.name.localeCompare(b.dataset.name);
+    }
+
+    function comparePriceAvailability(a, b) {
+      return Number(b.dataset.hasPrice === "true") - Number(a.dataset.hasPrice === "true");
+    }
+
+    async function selectSwitch(button) {
+      buttons.forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      await loadSwitch(button.dataset.switchId);
+    }
+
+    async function loadSwitch(id) {
+      detailListings.innerHTML = "";
+      detailTitle.textContent = "Loading...";
+      detailBrand.textContent = "";
+      detailAvatar.textContent = "";
+      emptyState.classList.add("hidden");
+      detailCard.classList.add("open");
+
+      const response = await fetch(`/api/switch/${id}`);
+      if (!response.ok) {
+        detailTitle.textContent = "Switch not found";
+        return;
+      }
+
+      const data = await response.json();
+      detailTitle.textContent = data.name;
+      detailBrand.textContent = data.brand;
+      detailAvatar.textContent = initials(data.brand);
+      detailListings.innerHTML = data.listings.length
+        ? data.listings.map(renderListing).join("")
+        : `<div class="vendor-card">No current vendor prices found.</div>`;
+    }
+
+    function renderListing(listing) {
+      const packPrice = money.format(Number(listing.retail_price));
+      const unitPrice = money.format(Number(listing.unit_price));
+      const isAvailable = Boolean(Number(listing.is_available));
+      const soldOutTag = isAvailable ? "" : `<span class="sold-out-tag">Sold out</span>`;
+      const sourceButton = listing.source_url
+        ? `<a class="vendor-link" href="${escapeHtml(listing.source_url)}" target="_blank" rel="noopener noreferrer">Visit listing</a>`
+        : "";
+
+      return `
+        <section class="vendor-card">
+          <div class="vendor-top">
+            <div>
+              <div class="vendor-heading">
+                <h3 class="vendor-name">${escapeHtml(listing.vendor_name)}</h3>
+                ${soldOutTag}
+              </div>
+              <p class="vendor-date">Updated ${escapeHtml(listing.date_updated || "unknown")}</p>
+            </div>
+            <div class="vendor-price">
+              ${packPrice}
+              <small>${unitPrice} each &middot; ${listing.quantity} pack</small>
+            </div>
+          </div>
+          ${sourceButton}
+        </section>
+      `;
+    }
+
+    function initials(value) {
+      return String(value || "?")
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((part) => part[0])
+        .join("")
+        .toUpperCase();
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+  </script>
+</body>
+</html>

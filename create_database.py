@@ -1,4 +1,6 @@
 import sqlite3
+from contextlib import closing
+from datetime import date
 from pathlib import Path
 
 
@@ -23,6 +25,7 @@ CREATE TABLE IF NOT EXISTS Vendor_Listings (
     unit_price REAL NOT NULL CHECK (unit_price >= 0),
     source_url TEXT,
     date_updated TEXT NOT NULL,
+    is_available INTEGER NOT NULL DEFAULT 1 CHECK (is_available IN (0, 1)),
 
     -- Each vendor listing row belongs to one keyboard item.
     -- Deleting a keyboard item also removes its related vendor listings.
@@ -40,8 +43,50 @@ CREATE INDEX IF NOT EXISTS idx_vendor_listings_date_updated
 
 
 def create_database(db_path: Path = DB_PATH) -> None:
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection:
+        apply_schema(connection)
+        connection.commit()
+
+
+def apply_schema(connection: sqlite3.Connection) -> None:
+    try:
         connection.executescript(SCHEMA)
+    except sqlite3.OperationalError as error:
+        if "date_updated" not in str(error) and "is_available" not in str(error):
+            raise
+
+        ensure_vendor_listing_columns(connection)
+        connection.executescript(SCHEMA)
+    else:
+        ensure_vendor_listing_columns(connection)
+
+
+def ensure_vendor_listing_columns(connection: sqlite3.Connection) -> None:
+    table = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'Vendor_Listings'
+        """
+    ).fetchone()
+    if table is None:
+        return
+
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(Vendor_Listings)").fetchall()
+    }
+
+    if "date_updated" not in columns:
+        today = date.today().isoformat()
+        connection.execute(
+            f"ALTER TABLE Vendor_Listings ADD COLUMN date_updated TEXT NOT NULL DEFAULT '{today}'"
+        )
+
+    if "is_available" not in columns:
+        connection.execute(
+            "ALTER TABLE Vendor_Listings ADD COLUMN is_available INTEGER NOT NULL DEFAULT 1"
+        )
 
 
 if __name__ == "__main__":

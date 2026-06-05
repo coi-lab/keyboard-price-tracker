@@ -1,4 +1,5 @@
 import argparse
+import json
 import re
 import sys
 import time
@@ -6,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -22,6 +23,8 @@ BASE_URL = "https://kbdfans.com"
 COLLECTION_URL = f"{BASE_URL}/collections/switches"
 DEFAULT_BRAND = "KBDFans"
 VENDOR_NAME = "KBDFans"
+MIN_REASONABLE_UNIT_PRICE = Decimal("0.15")
+MAX_REASONABLE_UNIT_PRICE = Decimal("1.50")
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,10 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
 
         for product in new_products:
             seen_urls.add(product.source_url)
+            product = ensure_reasonable_unit_price(product, session)
+            if product is None:
+                continue
+
             item_id = save_item_data(
                 name=product.name,
                 brand=product.brand,
@@ -143,7 +150,7 @@ def parse_product_card(card) -> Optional[Product]:
         return None
 
     name = extract_name(card, link)
-    source_url = urljoin(BASE_URL, link.get("href", ""))
+    source_url = normalize_product_url(urljoin(BASE_URL, link.get("href", "")))
     price = extract_price(card)
 
     if not name or price is None:
@@ -158,8 +165,139 @@ def parse_product_card(card) -> Optional[Product]:
     )
 
 
+def ensure_reasonable_unit_price(product: Product, session: requests.Session) -> Optional[Product]:
+    unit_price = calculate_unit_price(f"{product.name} {product.quantity}pcs", product.retail_price)
+    if is_reasonable_unit_price(unit_price):
+        return product
+
+    enriched_product = enrich_quantity_from_product_page(product, session)
+    enriched_unit_price = calculate_unit_price(
+        f"{enriched_product.name} {enriched_product.quantity}pcs",
+        enriched_product.retail_price,
+    )
+    if is_reasonable_unit_price(enriched_unit_price):
+        return enriched_product
+
+    print(
+        "Skipping implausible KBDFans price: "
+        f"{product.name} - ${product.retail_price} / {enriched_product.quantity} "
+        f"(${enriched_unit_price:.2f}/ea)"
+    )
+    return None
+
+
+def calculate_unit_price(name: str, raw_price: Decimal) -> Decimal:
+    quantity = infer_quantity(name)
+    return raw_price / Decimal(quantity)
+
+
+def is_reasonable_unit_price(unit_price: Decimal) -> bool:
+    return MIN_REASONABLE_UNIT_PRICE <= unit_price <= MAX_REASONABLE_UNIT_PRICE
+
+
+def enrich_quantity_from_product_page(product: Product, session: requests.Session) -> Product:
+    try:
+        html = fetch_html(product.source_url, session)
+    except RuntimeError as error:
+        print(f"Could not fetch KBDFans product page for quantity check: {product.source_url}: {error}")
+        return product
+
+    quantity = choose_quantity_for_price(
+        product.retail_price,
+        [product.quantity, *infer_quantities_from_product_page(html)],
+    )
+    return Product(
+        name=product.name,
+        brand=product.brand,
+        retail_price=product.retail_price,
+        quantity=quantity,
+        source_url=product.source_url,
+    )
+
+
+def choose_quantity_for_price(raw_price: Decimal, quantities: list[int]) -> int:
+    unique_quantities = sorted({quantity for quantity in quantities if quantity > 0})
+    for quantity in unique_quantities:
+        if is_reasonable_unit_price(raw_price / Decimal(quantity)):
+            return quantity
+    return max(unique_quantities) if unique_quantities else 1
+
+
+def infer_quantities_from_product_page(html: str) -> list[int]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = []
+
+    for selector in [
+        "option",
+        "button",
+        "label",
+        "[data-value]",
+        "[data-option-value]",
+        "[data-variant-title]",
+        ".product-form__input",
+        ".variant-input",
+    ]:
+        for element in soup.select(selector):
+            text_values = [element.get_text(" ", strip=True)]
+            for attr in ["value", "title", "aria-label", "data-value", "data-option-value", "data-variant-title"]:
+                attr_value = element.get(attr)
+                if attr_value:
+                    text_values.append(str(attr_value))
+            candidates.extend(text_values)
+
+    for script in soup.find_all("script"):
+        script_text = script.string or script.get_text()
+        if script_text and ("variant" in script_text.lower() or "pack" in script_text.lower()):
+            candidates.extend(extract_variant_texts(script_text))
+
+    return [infer_quantity(candidate) for candidate in candidates if infer_quantity(candidate) > 1]
+
+
+def extract_variant_texts(script_text: str) -> list[str]:
+    texts = []
+    for value in parse_json_values(script_text):
+        collect_variant_texts(value, texts)
+    return texts
+
+
+def parse_json_values(script_text: str) -> Iterable:
+    text = script_text.strip()
+    if not text:
+        return
+
+    try:
+        yield json.loads(text)
+        return
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", script_text):
+        try:
+            value, _ = decoder.raw_decode(script_text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        yield value
+
+
+def collect_variant_texts(value, texts: list[str]) -> None:
+    if isinstance(value, dict):
+        for key, nested_value in value.items():
+            if str(key).lower() in {"title", "name", "option1", "option2", "option3", "public_title"}:
+                texts.append(str(nested_value))
+            collect_variant_texts(nested_value, texts)
+    elif isinstance(value, list):
+        for nested_value in value:
+            collect_variant_texts(nested_value, texts)
+
+
 def find_product_link(card):
     links = card.select('a[href*="/collections/switches/products/"]')
+    for link in links:
+        candidate_name = link.get("title") or link.get_text(" ", strip=True)
+        if not is_pack_variant_label(candidate_name):
+            return link
+
     return links[0] if links else None
 
 
@@ -177,10 +315,38 @@ def extract_name(card, link) -> str:
         element = card.select_one(selector)
         if element:
             text = element.get_text(" ", strip=True)
-            if text:
+            if text and not is_pack_variant_label(text):
                 return text
 
-    return link.get("title") or link.get_text(" ", strip=True)
+    for attr in ("title", "aria-label"):
+        text = link.get(attr)
+        if text and not is_pack_variant_label(text):
+            return text
+
+    text = link.get_text(" ", strip=True)
+    return "" if is_pack_variant_label(text) else text
+
+
+def is_pack_variant_label(text: Optional[str]) -> bool:
+    if not text:
+        return False
+
+    normalized = clean_text(text).lower()
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return False
+
+    return bool(
+        re.fullmatch(r".*\bswitch(?:es)?\s*x\s*\d+", normalized)
+        or re.fullmatch(r"(?:switch(?:es)?\s*)?x\s*\d+", normalized)
+        or re.fullmatch(r"\d+\s*(?:switch(?:es)?|pcs|pieces)", normalized)
+        or re.fullmatch(r"pack\s*of\s*\d+", normalized)
+    )
+
+
+def normalize_product_url(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
 def extract_brand(card) -> Optional[str]:
@@ -260,9 +426,11 @@ def parse_prices(text: str) -> list[Decimal]:
 
 def infer_quantity(text: str) -> int:
     patterns = [
+        r"\b(\d+)\s*-\s*pack\b",
+        r"\b(\d+)\s*x\b",
         r"\bx\s*(\d+)\b",
         r"\((\d+)\)",
-        r"\b(\d+)\s*(?:pcs|pieces|switches)\b",
+        r"\b(\d+)\s*(?:pcs?|pieces|switches)\b",
         r"\bpack\s*of\s*(\d+)\b",
     ]
 

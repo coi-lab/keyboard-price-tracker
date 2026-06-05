@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Iterable, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,10 +25,10 @@ from core.core_engine import (
 )
 
 
-BASE_URL = "https://cannonkeys.com"
+BASE_URL = "https://divinikey.com"
 COLLECTION_URL = f"{BASE_URL}/collections/switches"
-DEFAULT_BRAND = "CannonKeys"
-VENDOR_NAME = "CannonKeys"
+DEFAULT_BRAND = "Divinikey"
+VENDOR_NAME = "Divinikey"
 
 
 @dataclass(frozen=True)
@@ -41,12 +41,6 @@ class Product:
     is_available: bool = True
 
 
-@dataclass(frozen=True)
-class ParseResult:
-    products: list[Product]
-    used_collection_json: bool
-
-
 def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int] = None) -> int:
     initialize_database()
 
@@ -55,95 +49,92 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
 
     saved_count = 0
     seen_urls: set[str] = set()
-    page = 1
 
-    while max_pages is None or page <= max_pages:
-        page_url = build_page_url(page)
-        print(f"Fetching page {page}: {page_url}")
+    for availability_filter, availability_label in [(1, "available"), (0, "out of stock")]:
+        page = 1
 
-        html = fetch_html(page_url, session)
-        parse_result = parse_products(html, session, page)
-        products = parse_result.products
+        while max_pages is None or page <= max_pages:
+            page_url = build_page_url(page, availability_filter)
+            print(f"Fetching {availability_label} page {page}: {page_url}")
 
-        if not products:
-            print(f"No products found on page {page}. Stopping.")
-            break
+            html = fetch_html(page_url, session)
+            products = list(parse_products(html))
 
-        new_products = [product for product in products if product.source_url not in seen_urls]
-        if not new_products:
-            print(f"Page {page} contained no new products. Stopping.")
-            break
+            if not products:
+                print(f"No products found on {availability_label} page {page}. Stopping.")
+                break
 
-        for product in new_products:
-            seen_urls.add(product.source_url)
-            item_id = save_item_data(
-                name=product.name,
-                brand=product.brand,
-                vendor_name=VENDOR_NAME,
-                retail_price=float(product.retail_price),
-                source_url=product.source_url,
-                quantity=product.quantity,
-                is_available=product.is_available,
-            )
-            saved_count += 1
-            print(f"Saved #{item_id}: {product.name} - ${product.retail_price} / {product.quantity}")
+            new_products = [product for product in products if product.source_url not in seen_urls]
+            if not new_products:
+                print(f"{availability_label.title()} page {page} contained no new products. Stopping.")
+                break
 
-        if parse_result.used_collection_json:
-            print(f"Shopify collection JSON returned {len(products)} products on page {page}. Stopping.")
-            break
+            for product in new_products:
+                product = enrich_product_from_product_json(product, session)
+                product = Product(
+                    name=product.name,
+                    brand=product.brand,
+                    retail_price=product.retail_price,
+                    quantity=product.quantity,
+                    source_url=product.source_url,
+                    is_available=availability_filter == 1,
+                )
+                seen_urls.add(product.source_url)
+                item_id = save_item_data(
+                    name=product.name,
+                    brand=product.brand,
+                    vendor_name=VENDOR_NAME,
+                    retail_price=float(product.retail_price),
+                    source_url=product.source_url,
+                    quantity=product.quantity,
+                    is_available=product.is_available,
+                )
+                saved_count += 1
+                print(f"Saved #{item_id}: {product.name} - ${product.retail_price} / {product.quantity}")
 
-        if not has_next_page(html, page):
-            print(f"No next-page link found after page {page}. Stopping.")
-            break
+            if not has_next_page(html, page):
+                print(f"No next-page link found after {availability_label} page {page}. Stopping.")
+                break
 
-        page += 1
-        time.sleep(delay_seconds)
+            page += 1
+            time.sleep(delay_seconds)
 
     return saved_count
 
 
-def build_page_url(page: int) -> str:
-    return f"{COLLECTION_URL}?page={page}"
+def build_page_url(page: int, availability_filter: Optional[int] = None) -> str:
+    if availability_filter is None:
+        return f"{COLLECTION_URL}?page={page}"
+    return f"{COLLECTION_URL}?filter.v.availability={availability_filter}&page={page}"
 
 
-def build_products_json_url(page: int) -> str:
-    return f"{COLLECTION_URL}/products.json?limit=250&page={page}"
-
-
-def parse_products(html: str, session: requests.Session, page: int) -> ParseResult:
+def parse_products(html: str) -> Iterable[Product]:
     soup = BeautifulSoup(html, "html.parser")
 
     products = list(parse_products_from_script_json(soup))
     if products:
-        return ParseResult(products=products, used_collection_json=False)
+        yield from products
+        return
 
-    products = list(parse_products_from_collection_json(session, page))
-    if products:
-        return ParseResult(products=products, used_collection_json=True)
-
-    products = []
     for card in find_product_cards(soup):
         product = parse_product_card(card)
         if product is not None:
-            products.append(product)
-
-    return ParseResult(products=products, used_collection_json=False)
+            yield product
 
 
 def parse_products_from_script_json(soup: BeautifulSoup) -> Iterable[Product]:
     seen_urls = set()
 
-    for script in soup.find_all("script", type="application/json"):
+    for script in soup.find_all("script"):
         script_text = script.string or script.get_text()
         if not script_text:
             continue
 
-        try:
-            data = json.loads(script_text)
-        except json.JSONDecodeError:
+        script_type = script.get("type", "")
+        if "application/json" not in script_type and "Shopify" not in script_text:
             continue
 
-        for raw_product in iter_shopify_products(data):
+        for raw_product in extract_shopify_products(script_text):
             product = product_from_shopify_dict(raw_product)
             if product is None or product.source_url in seen_urls:
                 continue
@@ -152,22 +143,29 @@ def parse_products_from_script_json(soup: BeautifulSoup) -> Iterable[Product]:
             yield product
 
 
-def parse_products_from_collection_json(
-    session: requests.Session,
-    page: int,
-) -> Iterable[Product]:
-    try:
-        response = session.get(build_products_json_url(page), timeout=20)
-        response.raise_for_status()
-        data = response.json()
-    except (requests.RequestException, json.JSONDecodeError) as error:
-        print(f"Could not parse CannonKeys collection JSON for page {page}: {error}")
+def extract_shopify_products(script_text: str) -> Iterable[dict]:
+    for value in parse_json_values(script_text):
+        yield from iter_shopify_products(value)
+
+
+def parse_json_values(script_text: str) -> Iterable:
+    text = script_text.strip()
+    if not text:
         return
 
-    for raw_product in data.get("products", []):
-        product = product_from_shopify_dict(raw_product)
-        if product is not None:
-            yield product
+    try:
+        yield json.loads(text)
+        return
+    except json.JSONDecodeError:
+        pass
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", script_text):
+        try:
+            value, _ = decoder.raw_decode(script_text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        yield value
 
 
 def iter_shopify_products(value) -> Iterable[dict]:
@@ -204,7 +202,7 @@ def product_from_shopify_dict(raw_product: dict) -> Optional[Product]:
         brand=normalize_brand(raw_product.get("vendor")) or infer_brand(name),
         retail_price=price,
         quantity=quantity,
-        source_url=urljoin(BASE_URL, f"/products/{handle}"),
+        source_url=build_product_url(handle),
         is_available=any_available_variant(raw_product.get("variants", [])),
     )
 
@@ -232,6 +230,7 @@ def price_from_variants(variants: list[dict], product_name: str) -> Optional[tup
                 str(value)
                 for value in [
                     variant.get("title"),
+                    variant.get("public_title"),
                     variant.get("option1"),
                     variant.get("option2"),
                     variant.get("option3"),
@@ -255,7 +254,10 @@ def parse_price_value(value) -> Optional[Decimal]:
     try:
         if isinstance(value, int):
             return Decimal(value) / Decimal("100")
-        return Decimal(str(value).replace("$", "").replace(",", "").strip())
+        decimal_value = Decimal(str(value).replace("$", "").replace(",", "").strip())
+        if decimal_value > 1000 and decimal_value == decimal_value.to_integral_value():
+            return decimal_value / Decimal("100")
+        return decimal_value
     except InvalidOperation:
         return None
 
@@ -273,7 +275,7 @@ def normalize_brand(value: Optional[str]) -> Optional[str]:
 
 
 def find_product_cards(soup: BeautifulSoup) -> list:
-    cards = soup.select(".product-block, .product-card, li.grid__item, .card")
+    cards = soup.select(".card, .product-card, .product-block, li.grid__item, .slider__item")
     cards = [card for card in cards if find_product_link(card) is not None]
     if cards:
         return cards
@@ -282,7 +284,7 @@ def find_product_cards(soup: BeautifulSoup) -> list:
     found_cards = []
     seen_urls = set()
     for link in product_links:
-        source_url = urljoin(BASE_URL, link.get("href", ""))
+        source_url = clean_product_url(urljoin(BASE_URL, link.get("href", "")))
         if source_url in seen_urls:
             continue
 
@@ -318,19 +320,20 @@ def parse_product_card(card) -> Optional[Product]:
     if not name or price is None:
         return None
 
-    card_text = card.get_text(" ", strip=True)
+    source_url = normalize_product_url(urljoin(BASE_URL, link.get("href", "")))
+
     return Product(
         name=clean_text(name),
         brand=extract_brand(card) or infer_brand(name),
         retail_price=price,
-        quantity=infer_quantity(f"{name} {card_text}"),
-        source_url=urljoin(BASE_URL, link.get("href", "")),
-        is_available=not is_sold_out_text(card_text),
+        quantity=infer_quantity(f"{name} {card.get_text(' ', strip=True)}"),
+        source_url=source_url,
+        is_available=not is_sold_out_text(card.get_text(" ", strip=True)),
     )
 
 
 def is_sold_out_text(text: str) -> bool:
-    return bool(re.search(r"\bsold\s*out\b|\bout\s*of\s*stock\b|\bunavailable\b", text, re.IGNORECASE))
+    return bool(re.search(r"\bsold\s*out\b|\bunavailable\b", text, re.IGNORECASE))
 
 
 def find_product_link(card):
@@ -340,13 +343,15 @@ def find_product_link(card):
 
 def extract_name(card, link) -> str:
     selectors = [
+        ".card__heading",
+        ".card-link",
         ".product-title",
         ".product-block__title",
-        ".card__heading",
-        ".title",
+        "[data-product-title]",
         "h1",
         "h2",
         "h3",
+        ".h6",
     ]
     for selector in selectors:
         element = card.select_one(selector)
@@ -379,6 +384,7 @@ def extract_brand(card) -> Optional[str]:
 def extract_price(card) -> Optional[Decimal]:
     selectors = [
         ".price__current",
+        ".js-value",
         ".price",
         ".product-price",
         "[data-product-price]",
@@ -408,12 +414,11 @@ def parse_prices(text: str) -> list[Decimal]:
 
 def infer_quantity(text: str) -> int:
     patterns = [
+        r"\b(\d+)\s*(?:set|pack)\b",
         r"\bpack\s*of\s*(\d+)\b",
         r"\b(\d+)\s*(?:switches|pcs|pieces)\b",
         r"\bx\s*(\d+)\b",
         r"\((\d+)\)",
-        r"^\s*(\d+)\b",
-        r"^\s*(\d+)\s*$",
     ]
 
     for pattern in patterns:
@@ -438,6 +443,9 @@ def infer_brand(name: str) -> str:
         ("Aflion", r"\baflion\b"),
         ("Durock", r"\bdurock\b"),
         ("TTC", r"\bttc\b"),
+        ("Gazzew", r"\bgazzew\b|\bboba\b|\bu4t?\b"),
+        ("Akko", r"\bakko\b"),
+        ("Invokeys", r"\binvokeys?\b"),
     ]
 
     for brand, pattern in brand_patterns:
@@ -447,20 +455,96 @@ def infer_brand(name: str) -> str:
     return DEFAULT_BRAND
 
 
+def clean_product_url(url: str) -> str:
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
+def normalize_product_url(url: str) -> str:
+    clean_url = clean_product_url(url)
+    handle = product_handle_from_url(clean_url)
+    if handle:
+        return build_product_url(handle)
+    return clean_url
+
+
+def build_product_url(handle: str) -> str:
+    return urljoin(BASE_URL, f"/products/{handle}")
+
+
+def build_product_json_url(source_url: str) -> Optional[str]:
+    handle = product_handle_from_url(source_url)
+    if not handle:
+        return None
+    return urljoin(BASE_URL, f"/products/{handle}.js")
+
+
+def product_handle_from_url(url: str) -> Optional[str]:
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        return None
+
+    if "products" in parts:
+        product_index = parts.index("products")
+        if product_index + 1 < len(parts):
+            return parts[product_index + 1]
+
+    return None
+
+
+def enrich_product_from_product_json(product: Product, session: requests.Session) -> Product:
+    if product.quantity > 1:
+        return product
+
+    json_url = build_product_json_url(product.source_url)
+    if json_url is None:
+        return product
+
+    try:
+        response = session.get(json_url, timeout=20)
+        response.raise_for_status()
+        raw_product = response.json()
+    except (requests.RequestException, json.JSONDecodeError):
+        return product
+
+    detailed_product = product_from_shopify_dict(raw_product)
+    if detailed_product is None:
+        return product
+
+    return Product(
+        name=product.name,
+        brand=detailed_product.brand or product.brand,
+        retail_price=detailed_product.retail_price,
+        quantity=detailed_product.quantity,
+        source_url=detailed_product.source_url,
+        is_available=detailed_product.is_available,
+    )
+
+
 def has_next_page(html: str, current_page: int) -> bool:
     soup = BeautifulSoup(html, "html.parser")
-    next_link = soup.select_one('a[rel="next"], a.pagination__next, a[href*="page="]')
+    next_link = soup.select_one('a[rel="next"], a.pagination__arrow--next[href], a.js-pagination-load-more[href]')
+    if next_link and page_number_from_href(next_link.get("href")) > current_page:
+        return True
 
-    if next_link and next_link.get("href"):
-        next_page_match = re.search(r"[?&]page=(\d+)", next_link["href"])
-        if next_page_match:
-            return int(next_page_match.group(1)) > current_page
+    for link in soup.select('a[href*="page="]'):
+        if page_number_from_href(link.get("href")) > current_page:
+            return True
 
     return bool(soup.select_one(f'a[href*="page={current_page + 1}"]'))
 
 
+def page_number_from_href(href: Optional[str]) -> int:
+    if not href:
+        return 0
+
+    page_match = re.search(r"[?&]page=(\d+)", href)
+    return int(page_match.group(1)) if page_match else 0
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Scrape CannonKeys switch prices.")
+    parser = argparse.ArgumentParser(description="Scrape Divinikey switch prices.")
     parser.add_argument(
         "--delay",
         type=float,

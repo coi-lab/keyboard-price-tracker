@@ -272,7 +272,7 @@ def find_product_cards(soup: BeautifulSoup) -> list:
     seen_urls = set()
 
     for link in product_links:
-        source_url = urljoin(BASE_URL, link.get("href", ""))
+        source_url = absolute_product_url(link.get("href", ""))
         if source_url in seen_urls or source_url == SWITCHES_URL:
             continue
 
@@ -314,7 +314,7 @@ def parse_product_card(card) -> Optional[Product]:
         brand=extract_brand(card) or infer_brand(name),
         retail_price=price,
         quantity=infer_quantity(f"{name} {card.get_text(' ', strip=True)}"),
-        source_url=urljoin(BASE_URL, link.get("href", "")),
+        source_url=absolute_product_url(link.get("href", "")),
     )
 
 
@@ -490,14 +490,22 @@ def normalize_product_url(path: Optional[str], name: str) -> str:
         if path.startswith("http"):
             return path
         if path.startswith("/"):
-            return urljoin(BASE_URL, path)
+            return absolute_product_url(path)
         if path.startswith("switches/"):
-            return urljoin(BASE_URL, f"/{path}")
+            return absolute_product_url(f"/{path}")
         if "/" not in path:
-            return urljoin(BASE_URL, f"/switches/{path}")
+            return absolute_product_url(f"/switches/{path}")
 
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return urljoin(BASE_URL, f"/switches/{slug}")
+    return absolute_product_url(f"/switches/{slug}")
+
+
+def absolute_product_url(extracted_url: Optional[str]) -> str:
+    if not extracted_url:
+        return BASE_URL
+    if extracted_url.startswith("http"):
+        return extracted_url
+    return urljoin(BASE_URL, extracted_url)
 
 
 def has_next_page(html: str) -> bool:

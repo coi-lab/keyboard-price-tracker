@@ -33,13 +33,22 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # 4. Run the scrapers! (Adjust these file names if yours are different)
-      - name: Execute Scrapers
-        run: |
-          python scrapers/divinikey_scraper.py
-          python scrapers/kineticlabs_scraper.py
-          python scrapers/kbdfans_scraper.py
-          python scrapers/cannonkeys_scraper.py
+      # 4. Run the scrapers independently
+      - name: Run Divinikey Scraper
+        run: python scrapers/divinikey_scraper.py
+        continue-on-error: true
+
+      - name: Run Kinetic Labs Scraper
+        run: python scrapers/kineticlabs_scraper.py
+        continue-on-error: true
+
+      - name: Run KBDfans Scraper
+        run: python scrapers/kbdfans_scraper.py
+        continue-on-error: true
+
+      - name: Run CannonKeys Scraper
+        run: python scrapers/cannonkeys_scraper.py
+        continue-on-error: true
 
       # 5. Save the updated database back to GitHub
       - name: Commit and Push Database

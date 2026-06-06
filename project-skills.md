@@ -42,6 +42,7 @@
 - Do not skip sold-out products solely because they are unavailable. Save them with `is_available=False` when the vendor still exposes a real price, URL, and quantity.
 - Use `Decimal` for parsed prices inside scrapers, then convert to `float` only when calling `save_item_data()`.
 - Normalize/deduplicate product URLs before saving. Query strings and variant URLs can create duplicate vendor/source rows if left uncleaned.
+- Scraper HTTP helpers should handle `429 Too Many Requests` with exponential backoff before giving up. Respect `Retry-After` when present; otherwise retry with increasing sleeps such as `2.5s`, `5s`, `10s`, capped to a small retry budget.
 - Prefer structured JSON/API sources when they are reliable, but keep HTML fallback parsers because vendor storefronts differ.
 - Preserve vendor-specific parser quirks instead of forcing a single generic scraper abstraction.
 
@@ -84,6 +85,8 @@
 - [CannonKeys] Do not skip sold-out products. JSON variants with `available == false` and HTML cards containing `Sold Out`, `Out of Stock`, or `Unavailable` should still be saved with `is_available=0` so price history remains complete.
 - [CannonKeys] Quantity can be embedded in SKU-like strings, e.g. `OA_SWITCH_110`; include `sku`/`barcode` fields in variant quantity inference before defaulting to one.
 - [Divinikey] Product `.js` JSON can omit pack size even when the product page HTML/title contains it, e.g. `(18 Pack)` or `18 included in each pack`. If JSON enrichment still leaves quantity at `1`, fetch the product page HTML and infer quantity from the page text/native unit price.
+- [Divinikey] Collection pagination is sensitive to rapid requests. Keep a fixed `2.5` second sleep at the end of each pagination loop even when test commands pass `--delay 0`, or the site may kick off the scraper.
+- [Scrapers] Treat HTTP `429 Too Many Requests` as a retryable client error. Use exponential backoff and honor `Retry-After` headers before failing, especially for hosted daily automation where a single fast pagination loop can poison the run.
 - [KBDFans] The scraper now performs a secondary product-page fetch for each collection product, with `time.sleep(1)` before the request. Quantity should come from product-page specs text using `extract_quantity_from_specs()`, default to `1`, and save only if computed unit price is within `$0.15-$1.50`.
 - [KBDFans] Product specs can express pack size as `35 per unit` rather than `pcs`, `pieces`, or `pack`. Treat `unit` as quantity context and parse `(\d+) per unit`; otherwise the scraper can accidentally pick noisy quantity dropdown values like `8`.
 - [Product Philosophy] The website is meant to build historical price intelligence and future price prediction. Scrapers should preserve unavailable/sold-out listings as observations whenever the price data is trustworthy; filtering should happen in the UI/query layer, not by dropping history at scrape time.

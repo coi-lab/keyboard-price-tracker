@@ -4,6 +4,9 @@ from contextlib import closing
 from datetime import date
 from pathlib import Path
 from typing import Optional
+import time
+import requests
+from requests.exceptions import RequestException
 
 import requests
 from thefuzz import fuzz
@@ -173,13 +176,37 @@ def initialize_database(db_path: Path = DB_PATH) -> None:
         raise RuntimeError(f"Could not initialize database at {db_path}: {error}") from error
 
 
-def fetch_html(url: str, session: requests.Session) -> str:
-    try:
-        response = session.get(url, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        return response.text
-    except requests.RequestException as error:
-        raise RuntimeError(f"Could not fetch {url}: {error}") from error
+def fetch_html(url: str, session: requests.Session, max_retries: int = 3) -> str | None:
+    """Fetches HTML with exponential backoff for 429 Too Many Requests errors."""
+    if not url:
+        return None
+
+    base_delay = 3.0  # Start with a 3-second delay on failure
+
+    for attempt in range(max_retries):
+        try:
+            response = session.get(url, timeout=10)
+            
+            # If successful, return the text immediately
+            if response.status_code == 200:
+                return response.text
+                
+            # If rate-limited, trigger exponential backoff
+            if response.status_code == 429:
+                wait_time = base_delay * (2 ** attempt)
+                print(f"[429 Rate Limit] Pausing for {wait_time}s before retrying {url}...")
+                time.sleep(wait_time)
+                continue
+                
+            # Handle other HTTP errors (e.g., 404 Not Found)
+            response.raise_for_status()
+
+        except RequestException as e:
+            print(f"[Fetch Error] Attempt {attempt + 1}/{max_retries} failed for {url}: {e}")
+            time.sleep(base_delay)
+            
+    print(f"❌ Failed to fetch {url} after {max_retries} attempts.")
+    return None
 
 
 def clean_text(text: str) -> str:

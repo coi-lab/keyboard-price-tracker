@@ -29,6 +29,7 @@ BASE_URL = "https://divinikey.com"
 COLLECTION_URL = f"{BASE_URL}/collections/switches"
 DEFAULT_BRAND = "Divinikey"
 VENDOR_NAME = "Divinikey"
+PAGINATION_DELAY_SECONDS = 2.5
 BLACKLISTED_TITLE_TERMS = [
     "sample pack",
     "tester pack",
@@ -113,7 +114,7 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
                 break
 
             page += 1
-            time.sleep(delay_seconds)
+            time.sleep(PAGINATION_DELAY_SECONDS)
 
     return saved_count
 

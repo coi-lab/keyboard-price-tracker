@@ -6,11 +6,12 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -29,6 +30,39 @@ BASE_URL = "https://kineticlabs.com"
 SWITCHES_URL = f"{BASE_URL}/switches"
 DEFAULT_BRAND = "Kinetic Labs"
 VENDOR_NAME = "Kinetic Labs"
+KINETIC_BRAND_SLUGS = {
+    "bsun": "bsun",
+    "cherry": "cherry",
+    "chosfox": "chosfox",
+    "durock": "durock",
+    "gateron": "gateron",
+    "hmx": "hmx",
+    "jwk": "jwk",
+    "kailh": "kailh",
+    "kinetic": "kinetic",
+    "kinetic labs": "kinetic",
+    "ktt": "ktt",
+    "tecsee": "tecsee",
+    "ttc": "ttc",
+    "wuque studio": "wuque-studios",
+    "wuque studios": "wuque-studios",
+}
+BLACKLISTED_TITLE_TERMS = [
+    "sample pack",
+    "tester pack",
+    "stem",
+    "spring",
+    "housing",
+    "lube",
+    "film",
+    "puller",
+    "opener",
+    "accessory",
+]
+UNIT_PRICE_PATTERN = re.compile(
+    r"\$\s*([0-9]+(?:\.[0-9]{1,4})?)\s*/\s*(?:switch|ea|each)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -51,33 +85,12 @@ def scrape_switches(delay_seconds: float = 2.0, max_pages: Optional[int] = None)
     page = 1
 
     while max_pages is None or page <= max_pages:
-        page_url = build_page_url(page)
-        print(f"Fetching page {page}: {page_url}")
-
-        html = fetch_html(page_url, session)
-        products = list(parse_products(html))
-
-        if not products:
-            print(f"No products found on page {page}. Stopping.")
-            break
-
-        new_products = [product for product in products if product.source_url not in seen_urls]
+        html, products = fetch_products_page(session, page)
+        new_products = dedupe_products(products, seen_urls, page)
         if not new_products:
-            print(f"Page {page} contained no new products. Stopping.")
             break
 
-        for product in new_products:
-            seen_urls.add(product.source_url)
-            item_id = save_item_data(
-                name=product.name,
-                brand=product.brand,
-                vendor_name=VENDOR_NAME,
-                retail_price=float(product.retail_price),
-                source_url=product.source_url,
-                quantity=product.quantity,
-            )
-            saved_count += 1
-            print(f"Saved #{item_id}: {product.name} - ${product.retail_price} / {product.quantity}")
+        saved_count += save_products(new_products, seen_urls)
 
         if not has_next_page(html):
             print(f"No next-page link found after page {page}. Stopping.")
@@ -86,6 +99,43 @@ def scrape_switches(delay_seconds: float = 2.0, max_pages: Optional[int] = None)
         page += 1
         time.sleep(delay_seconds)
 
+    return saved_count
+
+
+def fetch_products_page(session: requests.Session, page: int) -> tuple[str, list[Product]]:
+    page_url = build_page_url(page)
+    print(f"Fetching page {page}: {page_url}")
+
+    html = fetch_html(page_url, session)
+    return html, list(parse_products(html))
+
+
+def dedupe_products(products: list[Product], seen_urls: set[str], page: int) -> list[Product]:
+    if not products:
+        print(f"No products found on page {page}. Stopping.")
+        return []
+
+    new_products = [product for product in products if product.source_url not in seen_urls]
+    if not new_products:
+        print(f"Page {page} contained no new products. Stopping.")
+
+    return new_products
+
+
+def save_products(products: list[Product], seen_urls: set[str]) -> int:
+    saved_count = 0
+    for product in products:
+        seen_urls.add(product.source_url)
+        item_id = save_item_data(
+            name=product.name,
+            brand=product.brand,
+            vendor_name=VENDOR_NAME,
+            retail_price=float(product.retail_price),
+            source_url=product.source_url,
+            quantity=product.quantity,
+        )
+        saved_count += 1
+        print(f"Saved #{item_id}: {product.name} - ${product.retail_price} / {product.quantity}")
     return saved_count
 
 
@@ -155,19 +205,63 @@ def iter_collection_products(data: dict) -> Iterable[dict]:
 def product_from_collection_node(raw_product: dict) -> Optional[Product]:
     name = clean_text(raw_product.get("title", ""))
     handle = raw_product.get("handle", "")
-    variant_price = price_from_variants(raw_product.get("variants", {}), name)
+    if not is_switch_product(raw_product, name):
+        return None
 
+    variant_price = price_from_variants(raw_product.get("variants", {}), name)
     if not name or not handle or variant_price is None:
         return None
-    price, quantity = variant_price
 
+    price, quantity = variant_price
+    native_unit_price = extract_native_unit_price(json.dumps(raw_product, default=str))
+    if native_unit_price is not None:
+        quantity = quantity_from_unit_price(price, native_unit_price) or quantity
+
+    brand = normalize_brand(raw_product.get("vendor")) or infer_brand(name)
     return Product(
         name=name,
-        brand=normalize_brand(raw_product.get("vendor")) or infer_brand(name),
+        brand=brand,
         retail_price=price,
         quantity=quantity,
-        source_url=urljoin(BASE_URL, f"/switches/{handle}"),
+        source_url=build_product_url(handle, brand),
     )
+
+
+def is_switch_product(raw_product: dict, name: str) -> bool:
+    if is_blacklisted_title(name):
+        return False
+
+    product_type = clean_text(str(raw_product.get("productType", ""))).lower()
+    if product_type and product_type != "switches":
+        return False
+
+    normalized_name = name.lower()
+    excluded_terms = ["container", "fidget"]
+    return not any(term in normalized_name for term in excluded_terms)
+
+
+def is_blacklisted_title(title: str) -> bool:
+    normalized_title = title.lower()
+    return any(term in normalized_title for term in BLACKLISTED_TITLE_TERMS)
+
+
+def extract_native_unit_price(text: str) -> Optional[Decimal]:
+    match = UNIT_PRICE_PATTERN.search(text)
+    if match is None:
+        return None
+
+    try:
+        return Decimal(match.group(1))
+    except InvalidOperation:
+        return None
+
+
+def quantity_from_unit_price(retail_price: Decimal, unit_price: Decimal) -> Optional[int]:
+    if unit_price <= 0:
+        return None
+
+    quantity = int((retail_price / unit_price).to_integral_value())
+    return quantity if quantity > 0 else None
 
 
 def price_from_variants(variants: dict, product_name: str) -> Optional[tuple[Decimal, int]]:
@@ -186,10 +280,37 @@ def price_from_variants(variants: dict, product_name: str) -> Optional[tuple[Dec
         except InvalidOperation:
             continue
 
-        quantity = infer_quantity(f"{variant.get('title', '')} {product_name}")
+        quantity = infer_variant_quantity(variant, product_name)
         options.append((price, quantity))
 
     return min(options, key=lambda option: option[0]) if options else None
+
+
+def infer_variant_quantity(variant: dict, product_name: str) -> int:
+    metafield = variant.get("metafield")
+    if isinstance(metafield, dict):
+        quantity = quantity_from_metafield(metafield.get("value"))
+        if quantity is not None:
+            return quantity
+
+    title_quantity = infer_quantity(str(variant.get("title", "")))
+    if title_quantity > 1:
+        return title_quantity
+
+    return infer_quantity(f"{variant.get('title', '')} {product_name}")
+
+
+def quantity_from_metafield(value: Any) -> Optional[int]:
+    if not isinstance(value, str):
+        return None
+
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+    quantity = data.get("quantity", {}).get("quantity") if isinstance(data, dict) else None
+    return int(quantity) if isinstance(quantity, int) and quantity > 0 else None
 
 
 def normalize_brand(value: Optional[str]) -> Optional[str]:
@@ -250,30 +371,40 @@ def product_from_dict(raw_product: dict) -> Optional[Product]:
     path = first_text_value(raw_product, ["url", "href", "path", "slug", "handle"])
     price = first_price_value(raw_product)
 
-    if not name or price is None:
+    if not name or is_blacklisted_title(name) or price is None:
         return None
 
     source_url = normalize_product_url(path, name)
     if "/switches/" not in source_url:
         return None
 
+    native_unit_price = extract_native_unit_price(json.dumps(raw_product, default=str))
+    quantity = infer_quantity(name)
+    if native_unit_price is not None:
+        quantity = quantity_from_unit_price(price, native_unit_price) or quantity
+
     return Product(
         name=clean_text(name),
         brand=first_text_value(raw_product, ["brand", "vendor", "manufacturer"]) or infer_brand(name),
         retail_price=price,
-        quantity=infer_quantity(name),
+        quantity=quantity,
         source_url=source_url,
     )
 
 
 def find_product_cards(soup: BeautifulSoup) -> list:
-    product_links = soup.select('a[href*="/switches/"]')
+    product_links = soup.select(
+        'a[href*="/switches/"], '
+        'a[href*="/products/"], '
+        'a[href^="switches/"], '
+        'a[href^="/switches"]'
+    )
     cards = []
     seen_urls = set()
 
     for link in product_links:
         source_url = absolute_product_url(link.get("href", ""))
-        if source_url in seen_urls or source_url == SWITCHES_URL:
+        if source_url in seen_urls or not is_product_url(source_url):
             continue
 
         card = find_priced_parent(link)
@@ -284,7 +415,7 @@ def find_product_cards(soup: BeautifulSoup) -> list:
     return cards
 
 
-def find_priced_parent(link):
+def find_priced_parent(link: Tag) -> Optional[Tag]:
     current = link
     for _ in range(10):
         if current is None:
@@ -299,38 +430,60 @@ def find_priced_parent(link):
     return None
 
 
-def parse_product_card(card) -> Optional[Product]:
+def parse_product_card(card: Tag) -> Optional[Product]:
     link = find_product_link(card)
     if link is None:
         return None
 
     name = extract_name(card, link)
     price = extract_price(card)
-    if not name or price is None:
+    if not name or is_blacklisted_title(name) or price is None:
         return None
+
+    card_text = card.get_text(" ", strip=True)
+    native_unit_price = extract_native_unit_price(card_text)
+    quantity = infer_quantity(f"{name} {card_text}")
+    if native_unit_price is not None:
+        quantity = quantity_from_unit_price(price, native_unit_price) or quantity
 
     return Product(
         name=clean_text(name),
         brand=extract_brand(card) or infer_brand(name),
         retail_price=price,
-        quantity=infer_quantity(f"{name} {card.get_text(' ', strip=True)}"),
+        quantity=quantity,
         source_url=absolute_product_url(link.get("href", "")),
     )
 
 
-def find_product_link(card):
-    links = card.select('a[href*="/switches/"]')
-    return links[0] if links else None
+def find_product_link(card: Tag) -> Optional[Tag]:
+    links = card.select(
+        'a[href*="/switches/"], '
+        'a[href*="/products/"], '
+        'a[href^="switches/"], '
+        'a[href^="/switches"]'
+    )
+    for link in links:
+        source_url = absolute_product_url(link.get("href", ""))
+        if is_product_url(source_url):
+            return link
+
+    return None
 
 
-def extract_name(card, link) -> str:
+def extract_name(card: Tag, link: Tag) -> str:
     selectors = [
+        "[data-testid*='product'][data-testid*='title']",
+        "[data-product-title]",
+        "[class*='ProductCard'][class*='title']",
+        "[class*='product-card'][class*='title']",
+        "[class*='productCard'][class*='title']",
+        "[class*='product-title']",
+        "[class*='productTitle']",
+        "[class*='title']",
+        "[class*='name']",
         "h1",
         "h2",
         "h3",
-        "[data-product-title]",
-        "[class*='title']",
-        "[class*='name']",
     ]
     for selector in selectors:
         element = card.select_one(selector)
@@ -342,7 +495,7 @@ def extract_name(card, link) -> str:
     return clean_text(link.get("title") or link.get_text(" ", strip=True))
 
 
-def extract_brand(card) -> Optional[str]:
+def extract_brand(card: Tag) -> Optional[str]:
     selectors = [
         "[data-product-vendor]",
         "[class*='brand']",
@@ -378,7 +531,7 @@ def infer_brand(name: str) -> str:
     return DEFAULT_BRAND
 
 
-def extract_price(card) -> Optional[Decimal]:
+def extract_price(card: Tag) -> Optional[Decimal]:
     return first_decimal(parse_prices(card.get_text(" ", strip=True)))
 
 
@@ -401,7 +554,7 @@ def first_price_value(raw_product: dict) -> Optional[Decimal]:
     return first_decimal(parsed_prices)
 
 
-def parse_price_value(value) -> list[Decimal]:
+def parse_price_value(value: Any) -> list[Decimal]:
     if isinstance(value, (int, float)):
         decimal_value = Decimal(str(value))
         if decimal_value > 1000 and decimal_value == decimal_value.to_integral_value():
@@ -445,10 +598,12 @@ def first_decimal(prices: list[Decimal]) -> Optional[Decimal]:
 
 def infer_quantity(text: str) -> int:
     patterns = [
+        r"^\s*(\d+)\b",
         r"\bpack\s*of\s*(\d+)\b",
         r"\b(\d+)\s*(?:switches|pcs|pieces)\b",
         r"\bx\s*(\d+)\b",
         r"\((\d+)\)",
+        r"\b(\d+)\s*$",
     ]
 
     for pattern in patterns:
@@ -473,7 +628,7 @@ def first_text_value(raw_product: dict, keys: list[str]) -> Optional[str]:
     return None
 
 
-def collect_values_for_keys(value, keys: list[str], output: list) -> None:
+def collect_values_for_keys(value: Any, keys: list[str], output: list) -> None:
     key_set = {key.lower() for key in keys}
     if isinstance(value, dict):
         for key, nested_value in value.items():
@@ -487,17 +642,35 @@ def collect_values_for_keys(value, keys: list[str], output: list) -> None:
 
 def normalize_product_url(path: Optional[str], name: str) -> str:
     if path:
-        if path.startswith("http"):
-            return path
-        if path.startswith("/"):
-            return absolute_product_url(path)
-        if path.startswith("switches/"):
-            return absolute_product_url(f"/{path}")
-        if "/" not in path:
-            return absolute_product_url(f"/switches/{path}")
+        normalized_path = path.strip()
+        if normalized_path.startswith("http") or normalized_path.startswith("/"):
+            return absolute_product_url(normalized_path)
+        if normalized_path.startswith("products/"):
+            return absolute_product_url(f"/{normalized_path}")
+        if normalized_path.startswith("switches/"):
+            return absolute_product_url(f"/{normalized_path}")
+        if "/" not in normalized_path:
+            return build_product_url(normalized_path, infer_brand(name))
 
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return absolute_product_url(f"/switches/{slug}")
+    return build_product_url(slug, infer_brand(name))
+
+
+def build_product_url(handle: str, brand: str) -> str:
+    clean_handle = handle.strip("/")
+    if clean_handle.startswith("switches/"):
+        return absolute_product_url(f"/{clean_handle}")
+
+    brand_slug = brand_slug_from_name(brand)
+    return absolute_product_url(f"/switches/{brand_slug}/{clean_handle}")
+
+
+def brand_slug_from_name(brand: str) -> str:
+    normalized_brand = clean_text(brand).lower()
+    if normalized_brand in KINETIC_BRAND_SLUGS:
+        return KINETIC_BRAND_SLUGS[normalized_brand]
+
+    return re.sub(r"[^a-z0-9]+", "-", normalized_brand).strip("-")
 
 
 def absolute_product_url(extracted_url: Optional[str]) -> str:
@@ -506,6 +679,13 @@ def absolute_product_url(extracted_url: Optional[str]) -> str:
     if extracted_url.startswith("http"):
         return extracted_url
     return urljoin(BASE_URL, extracted_url)
+
+
+def is_product_url(url: str) -> bool:
+    return (
+        url.startswith(f"{BASE_URL}/products/")
+        or url.startswith(f"{BASE_URL}/switches/")
+    ) and url.rstrip("/") != SWITCHES_URL
 
 
 def has_next_page(html: str) -> bool:

@@ -6,11 +6,12 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -25,6 +26,22 @@ DEFAULT_BRAND = "KBDFans"
 VENDOR_NAME = "KBDFans"
 MIN_REASONABLE_UNIT_PRICE = Decimal("0.15")
 MAX_REASONABLE_UNIT_PRICE = Decimal("1.50")
+BLACKLISTED_TITLE_TERMS = [
+    "sample pack",
+    "tester pack",
+    "stem",
+    "spring",
+    "housing",
+    "lube",
+    "film",
+    "puller",
+    "opener",
+    "accessory",
+]
+UNIT_PRICE_PATTERN = re.compile(
+    r"\$\s*([0-9]+(?:\.[0-9]{1,4})?)\s*/\s*(?:switch|ea|each)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -47,37 +64,12 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
     page = 1
 
     while max_pages is None or page <= max_pages:
-        page_url = build_page_url(page)
-        print(f"Fetching page {page}: {page_url}")
-
-        html = fetch_html(page_url, session)
-        products = list(parse_products(html))
-
-        if not products:
-            print(f"No products found on page {page}. Stopping.")
-            break
-
-        new_products = [product for product in products if product.source_url not in seen_urls]
+        html, products = fetch_products_page(session, page)
+        new_products = dedupe_products(products, seen_urls, page)
         if not new_products:
-            print(f"Page {page} contained no new products. Stopping.")
             break
 
-        for product in new_products:
-            seen_urls.add(product.source_url)
-            product = ensure_reasonable_unit_price(product, session)
-            if product is None:
-                continue
-
-            item_id = save_item_data(
-                name=product.name,
-                brand=product.brand,
-                vendor_name=VENDOR_NAME,
-                retail_price=float(product.retail_price),
-                source_url=product.source_url,
-                quantity=product.quantity,
-            )
-            saved_count += 1
-            print(f"Saved #{item_id}: {product.name} - ${product.retail_price} / {product.quantity}")
+        saved_count += normalize_and_save_products(new_products, seen_urls, session)
 
         if not has_next_page(html, page):
             print(f"No next-page link found after page {page}. Stopping.")
@@ -86,6 +78,54 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
         page += 1
         time.sleep(delay_seconds)
 
+    return saved_count
+
+
+def fetch_products_page(session: requests.Session, page: int) -> tuple[str, list[Product]]:
+    page_url = build_page_url(page)
+    print(f"Fetching page {page}: {page_url}")
+
+    html = fetch_html(page_url, session)
+    return html, list(parse_products(html))
+
+
+def dedupe_products(products: list[Product], seen_urls: set[str], page: int) -> list[Product]:
+    if not products:
+        print(f"No products found on page {page}. Stopping.")
+        return []
+
+    new_products = [product for product in products if product.source_url not in seen_urls]
+    if not new_products:
+        print(f"Page {page} contained no new products. Stopping.")
+
+    return new_products
+
+
+def normalize_and_save_products(
+    products: list[Product],
+    seen_urls: set[str],
+    session: requests.Session,
+) -> int:
+    saved_count = 0
+    for product in products:
+        seen_urls.add(product.source_url)
+        normalized_product = normalize_product_from_specs(product, session)
+        if normalized_product is None:
+            continue
+
+        item_id = save_item_data(
+            name=normalized_product.name,
+            brand=normalized_product.brand,
+            vendor_name=VENDOR_NAME,
+            retail_price=float(normalized_product.retail_price),
+            source_url=normalized_product.source_url,
+            quantity=normalized_product.quantity,
+        )
+        saved_count += 1
+        print(
+            f"Saved #{item_id}: {normalized_product.name} - "
+            f"${normalized_product.retail_price} / {normalized_product.quantity}"
+        )
     return saved_count
 
 
@@ -129,7 +169,7 @@ def find_product_cards(soup: BeautifulSoup) -> list:
     return cards
 
 
-def find_priced_parent(link):
+def find_priced_parent(link: Tag) -> Optional[Tag]:
     current = link
     for _ in range(8):
         if current is None:
@@ -144,7 +184,7 @@ def find_priced_parent(link):
     return None
 
 
-def parse_product_card(card) -> Optional[Product]:
+def parse_product_card(card: Tag) -> Optional[Product]:
     link = find_product_link(card)
     if link is None:
         return None
@@ -153,7 +193,7 @@ def parse_product_card(card) -> Optional[Product]:
     source_url = normalize_product_url(urljoin(BASE_URL, link.get("href", "")))
     price = extract_price(card)
 
-    if not name or price is None:
+    if not name or is_blacklisted_title(name) or price is None:
         return None
 
     return Product(
@@ -165,25 +205,64 @@ def parse_product_card(card) -> Optional[Product]:
     )
 
 
-def ensure_reasonable_unit_price(product: Product, session: requests.Session) -> Optional[Product]:
-    unit_price = calculate_unit_price(f"{product.name} {product.quantity}pcs", product.retail_price)
-    if is_reasonable_unit_price(unit_price):
-        return product
+def normalize_product_from_specs(product: Product, session: requests.Session) -> Optional[Product]:
+    time.sleep(1)
+    try:
+        html = fetch_html(product.source_url, session)
+    except RuntimeError as error:
+        print(f"KBDFans anomaly: could not fetch specs for {product.name}: {error}")
+        return None
 
-    enriched_product = enrich_quantity_from_product_page(product, session)
-    enriched_unit_price = calculate_unit_price(
-        f"{enriched_product.name} {enriched_product.quantity}pcs",
-        enriched_product.retail_price,
-    )
-    if is_reasonable_unit_price(enriched_unit_price):
-        return enriched_product
+    native_unit_price = extract_native_unit_price(html)
+    if native_unit_price is not None:
+        quantity = quantity_from_unit_price(product.retail_price, native_unit_price) or product.quantity
+        return product_with_quantity(product, quantity)
 
-    print(
-        "Skipping implausible KBDFans price: "
-        f"{product.name} - ${product.retail_price} / {enriched_product.quantity} "
-        f"(${enriched_unit_price:.2f}/ea)"
+    quantity = extract_quantity_from_specs(html)
+    unit_price = product.retail_price / Decimal(quantity)
+    if not is_reasonable_unit_price(unit_price):
+        print(
+            "KBDFans anomaly: skipping implausible unit price "
+            f"{product.name} - ${product.retail_price} / {quantity} "
+            f"(${unit_price:.2f}/ea)"
+        )
+        return None
+
+    return product_with_quantity(product, quantity)
+
+
+def product_with_quantity(product: Product, quantity: int) -> Product:
+    return Product(
+        name=product.name,
+        brand=product.brand,
+        retail_price=product.retail_price,
+        quantity=quantity,
+        source_url=product.source_url,
     )
-    return None
+
+
+def is_blacklisted_title(title: str) -> bool:
+    normalized_title = title.lower()
+    return any(term in normalized_title for term in BLACKLISTED_TITLE_TERMS)
+
+
+def extract_native_unit_price(text: str) -> Optional[Decimal]:
+    match = UNIT_PRICE_PATTERN.search(text)
+    if match is None:
+        return None
+
+    try:
+        return Decimal(match.group(1))
+    except InvalidOperation:
+        return None
+
+
+def quantity_from_unit_price(retail_price: Decimal, unit_price: Decimal) -> Optional[int]:
+    if unit_price <= 0:
+        return None
+
+    quantity = int((retail_price / unit_price).to_integral_value())
+    return quantity if quantity > 0 else None
 
 
 def calculate_unit_price(name: str, raw_price: Decimal) -> Decimal:
@@ -195,62 +274,51 @@ def is_reasonable_unit_price(unit_price: Decimal) -> bool:
     return MIN_REASONABLE_UNIT_PRICE <= unit_price <= MAX_REASONABLE_UNIT_PRICE
 
 
-def enrich_quantity_from_product_page(product: Product, session: requests.Session) -> Product:
-    try:
-        html = fetch_html(product.source_url, session)
-    except RuntimeError as error:
-        print(f"Could not fetch KBDFans product page for quantity check: {product.source_url}: {error}")
-        return product
-
-    quantity = choose_quantity_for_price(
-        product.retail_price,
-        [product.quantity, *infer_quantities_from_product_page(html)],
-    )
-    return Product(
-        name=product.name,
-        brand=product.brand,
-        retail_price=product.retail_price,
-        quantity=quantity,
-        source_url=product.source_url,
-    )
-
-
-def choose_quantity_for_price(raw_price: Decimal, quantities: list[int]) -> int:
-    unique_quantities = sorted({quantity for quantity in quantities if quantity > 0})
-    for quantity in unique_quantities:
-        if is_reasonable_unit_price(raw_price / Decimal(quantity)):
-            return quantity
-    return max(unique_quantities) if unique_quantities else 1
-
-
-def infer_quantities_from_product_page(html: str) -> list[int]:
+def extract_quantity_from_specs(html: str) -> int:
     soup = BeautifulSoup(html, "html.parser")
-    candidates = []
+    priority_candidates = []
+    fallback_candidates = []
 
-    for selector in [
-        "option",
-        "button",
-        "label",
-        "[data-value]",
-        "[data-option-value]",
-        "[data-variant-title]",
-        ".product-form__input",
-        ".variant-input",
-    ]:
+    for selector in ["tr", "li", "p", "dt", "dd", "[class*='spec']", "[class*='rte']", "[class*='description']"]:
         for element in soup.select(selector):
-            text_values = [element.get_text(" ", strip=True)]
-            for attr in ["value", "title", "aria-label", "data-value", "data-option-value", "data-variant-title"]:
-                attr_value = element.get(attr)
-                if attr_value:
-                    text_values.append(str(attr_value))
-            candidates.extend(text_values)
+            text = clean_text(element.get_text(" ", strip=True))
+            if is_quantity_context(text):
+                priority_candidates.append(text)
+
+    page_text = clean_text(soup.get_text(" ", strip=True))
+    if is_quantity_context(page_text):
+        fallback_candidates.append(page_text)
 
     for script in soup.find_all("script"):
         script_text = script.string or script.get_text()
-        if script_text and ("variant" in script_text.lower() or "pack" in script_text.lower()):
-            candidates.extend(extract_variant_texts(script_text))
+        if script_text and is_quantity_context(script_text):
+            fallback_candidates.extend(extract_variant_texts(script_text))
 
-    return [infer_quantity(candidate) for candidate in candidates if infer_quantity(candidate) > 1]
+    quantities = extract_quantities(priority_candidates) or extract_quantities(fallback_candidates)
+    return max(quantities) if quantities else 1
+
+
+def is_quantity_context(text: str) -> bool:
+    return bool(re.search(r"\b(quantity|pcs?|pieces?|pack|switches|unit)\b", text, re.IGNORECASE))
+
+
+def extract_quantities(candidates: list[str]) -> list[int]:
+    quantities = []
+    for candidate in candidates:
+        for pattern in [
+            r"\bquantity\b\s*[:\-]?\s*(\d+)\b",
+            r"\b(\d+)\s*per\s*unit\b",
+            r"\b(\d+)\s*-\s*pack\b",
+            r"\bpack\s*of\s*(\d+)\b",
+            r"\b(\d+)\s*(?:pcs?|pieces|switches)\b",
+            r"\bx\s*(\d+)\b",
+            r"\b(\d+)\s*x\b",
+        ]:
+            for match in re.finditer(pattern, candidate, re.IGNORECASE):
+                quantity = int(match.group(1))
+                if 1 <= quantity <= 200:
+                    quantities.append(quantity)
+    return quantities
 
 
 def extract_variant_texts(script_text: str) -> list[str]:
@@ -260,7 +328,7 @@ def extract_variant_texts(script_text: str) -> list[str]:
     return texts
 
 
-def parse_json_values(script_text: str) -> Iterable:
+def parse_json_values(script_text: str) -> Iterable[Any]:
     text = script_text.strip()
     if not text:
         return
@@ -280,7 +348,7 @@ def parse_json_values(script_text: str) -> Iterable:
         yield value
 
 
-def collect_variant_texts(value, texts: list[str]) -> None:
+def collect_variant_texts(value: Any, texts: list[str]) -> None:
     if isinstance(value, dict):
         for key, nested_value in value.items():
             if str(key).lower() in {"title", "name", "option1", "option2", "option3", "public_title"}:
@@ -291,7 +359,7 @@ def collect_variant_texts(value, texts: list[str]) -> None:
             collect_variant_texts(nested_value, texts)
 
 
-def find_product_link(card):
+def find_product_link(card: Tag) -> Optional[Tag]:
     links = card.select('a[href*="/collections/switches/products/"]')
     for link in links:
         candidate_name = link.get("title") or link.get_text(" ", strip=True)
@@ -301,7 +369,7 @@ def find_product_link(card):
     return links[0] if links else None
 
 
-def extract_name(card, link) -> str:
+def extract_name(card: Tag, link: Tag) -> str:
     selectors = [
         ".product-block__title",
         ".product-title",
@@ -349,7 +417,7 @@ def normalize_product_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
-def extract_brand(card) -> Optional[str]:
+def extract_brand(card: Tag) -> Optional[str]:
     selectors = [
         ".vendor",
         ".product-vendor",
@@ -387,7 +455,7 @@ def infer_brand(name: str) -> str:
     return DEFAULT_BRAND
 
 
-def extract_price(card) -> Optional[Decimal]:
+def extract_price(card: Tag) -> Optional[Decimal]:
     selectors = [
         "[data-product-price]",
         ".theme-money",
@@ -456,7 +524,7 @@ def has_next_page(html: str, current_page: int) -> bool:
     return bool(soup.select_one(f'a[href*="page={current_page + 1}"]'))
 
 
-def class_text(tag) -> str:
+def class_text(tag: Tag) -> str:
     classes = tag.get("class") or []
     return " ".join(classes)
 

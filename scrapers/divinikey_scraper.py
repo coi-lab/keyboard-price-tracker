@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
@@ -29,6 +29,22 @@ BASE_URL = "https://divinikey.com"
 COLLECTION_URL = f"{BASE_URL}/collections/switches"
 DEFAULT_BRAND = "Divinikey"
 VENDOR_NAME = "Divinikey"
+BLACKLISTED_TITLE_TERMS = [
+    "sample pack",
+    "tester pack",
+    "stem",
+    "spring",
+    "housing",
+    "lube",
+    "film",
+    "puller",
+    "opener",
+    "accessory",
+]
+UNIT_PRICE_PATTERN = re.compile(
+    r"\$\s*([0-9]+(?:\.[0-9]{1,4})?)\s*/\s*(?:switch|ea|each)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -193,9 +209,12 @@ def product_from_shopify_dict(raw_product: dict) -> Optional[Product]:
     handle = raw_product.get("handle", "")
     variant_price = price_from_variants(raw_product.get("variants", []), name)
 
-    if not name or not handle or variant_price is None:
+    if not name or is_blacklisted_title(name) or not handle or variant_price is None:
         return None
     price, quantity = variant_price
+    native_unit_price = extract_native_unit_price(json.dumps(raw_product, default=str))
+    if native_unit_price is not None:
+        quantity = quantity_from_unit_price(price, native_unit_price) or quantity
 
     return Product(
         name=name,
@@ -225,26 +244,52 @@ def price_from_variants(variants: list[dict], product_name: str) -> Optional[tup
         if price is None:
             continue
 
-        quantity = infer_quantity(
-            " ".join(
-                str(value)
-                for value in [
-                    variant.get("title"),
-                    variant.get("public_title"),
-                    variant.get("option1"),
-                    variant.get("option2"),
-                    variant.get("option3"),
-                    product_name,
-                ]
-                if value
-            )
-        )
+        quantity = infer_quantity(variant_quantity_text(variant, product_name))
         fallback_options.append((price, quantity))
         if variant.get("available", True):
             available_options.append((price, quantity))
 
     options = available_options or fallback_options
     return min(options, key=lambda option: option[0]) if options else None
+
+
+def variant_quantity_text(variant: dict, product_name: str) -> str:
+    return " ".join(
+        str(value)
+        for value in [
+            variant.get("title"),
+            variant.get("public_title"),
+            variant.get("option1"),
+            variant.get("option2"),
+            variant.get("option3"),
+            product_name,
+        ]
+        if value
+    )
+
+
+def is_blacklisted_title(title: str) -> bool:
+    normalized_title = title.lower()
+    return any(term in normalized_title for term in BLACKLISTED_TITLE_TERMS)
+
+
+def extract_native_unit_price(text: str) -> Optional[Decimal]:
+    match = UNIT_PRICE_PATTERN.search(text)
+    if match is None:
+        return None
+
+    try:
+        return Decimal(match.group(1))
+    except InvalidOperation:
+        return None
+
+
+def quantity_from_unit_price(retail_price: Decimal, unit_price: Decimal) -> Optional[int]:
+    if unit_price <= 0:
+        return None
+
+    quantity = int((retail_price / unit_price).to_integral_value())
+    return quantity if quantity > 0 else None
 
 
 def parse_price_value(value) -> Optional[Decimal]:
@@ -317,18 +362,23 @@ def parse_product_card(card) -> Optional[Product]:
 
     name = extract_name(card, link)
     price = extract_price(card)
-    if not name or price is None:
+    if not name or is_blacklisted_title(name) or price is None:
         return None
 
     source_url = normalize_product_url(urljoin(BASE_URL, link.get("href", "")))
+    card_text = card.get_text(" ", strip=True)
+    native_unit_price = extract_native_unit_price(card_text)
+    quantity = infer_quantity(f"{name} {card_text}")
+    if native_unit_price is not None:
+        quantity = quantity_from_unit_price(price, native_unit_price) or quantity
 
     return Product(
         name=clean_text(name),
         brand=extract_brand(card) or infer_brand(name),
         retail_price=price,
-        quantity=infer_quantity(f"{name} {card.get_text(' ', strip=True)}"),
+        quantity=quantity,
         source_url=source_url,
-        is_available=not is_sold_out_text(card.get_text(" ", strip=True)),
+        is_available=not is_sold_out_text(card_text),
     )
 
 
@@ -414,11 +464,14 @@ def parse_prices(text: str) -> list[Decimal]:
 
 def infer_quantity(text: str) -> int:
     patterns = [
+        r"\b(\d+)\s*-\s*pack\b",
         r"\b(\d+)\s*(?:set|pack)\b",
         r"\bpack\s*of\s*(\d+)\b",
+        r"\b(\d+)\s+included\s+in\s+each\s+pack\b",
         r"\b(\d+)\s*(?:switches|pcs|pieces)\b",
         r"\bx\s*(\d+)\b",
         r"\((\d+)\)",
+        r"\b(\d+)\s*$",
     ]
 
     for pattern in patterns:
@@ -512,13 +565,47 @@ def enrich_product_from_product_json(product: Product, session: requests.Session
     if detailed_product is None:
         return product
 
-    return Product(
+    enriched_product = Product(
         name=product.name,
         brand=detailed_product.brand or product.brand,
         retail_price=detailed_product.retail_price,
         quantity=detailed_product.quantity,
         source_url=detailed_product.source_url,
         is_available=detailed_product.is_available,
+    )
+    if enriched_product.quantity > 1:
+        return enriched_product
+
+    return enrich_quantity_from_product_page(enriched_product, session)
+
+
+def enrich_quantity_from_product_page(product: Product, session: requests.Session) -> Product:
+    try:
+        html = fetch_html(product.source_url, session)
+    except requests.RequestException:
+        return product
+
+    native_unit_price = extract_native_unit_price(html)
+    if native_unit_price is not None:
+        quantity = quantity_from_unit_price(product.retail_price, native_unit_price)
+        if quantity is not None:
+            return product_with_quantity(product, quantity)
+
+    quantity = infer_quantity(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
+    if quantity > 1:
+        return product_with_quantity(product, quantity)
+
+    return product
+
+
+def product_with_quantity(product: Product, quantity: int) -> Product:
+    return Product(
+        name=product.name,
+        brand=product.brand,
+        retail_price=product.retail_price,
+        quantity=quantity,
+        source_url=product.source_url,
+        is_available=product.is_available,
     )
 
 

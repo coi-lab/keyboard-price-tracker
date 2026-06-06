@@ -6,11 +6,12 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -29,6 +30,18 @@ BASE_URL = "https://cannonkeys.com"
 COLLECTION_URL = f"{BASE_URL}/collections/switches"
 DEFAULT_BRAND = "CannonKeys"
 VENDOR_NAME = "CannonKeys"
+BLACKLISTED_TITLE_TERMS = [
+    "sample pack",
+    "tester pack",
+    "stem",
+    "spring",
+    "housing",
+    "lube",
+    "film",
+    "puller",
+    "opener",
+    "accessory",
+]
 
 
 @dataclass(frozen=True)
@@ -58,35 +71,12 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
     page = 1
 
     while max_pages is None or page <= max_pages:
-        page_url = build_page_url(page)
-        print(f"Fetching page {page}: {page_url}")
-
-        html = fetch_html(page_url, session)
-        parse_result = parse_products(html, session, page)
-        products = parse_result.products
-
-        if not products:
-            print(f"No products found on page {page}. Stopping.")
-            break
-
-        new_products = [product for product in products if product.source_url not in seen_urls]
+        html, parse_result = fetch_products_page(session, page)
+        new_products = dedupe_products(parse_result.products, seen_urls, page)
         if not new_products:
-            print(f"Page {page} contained no new products. Stopping.")
             break
 
-        for product in new_products:
-            seen_urls.add(product.source_url)
-            item_id = save_item_data(
-                name=product.name,
-                brand=product.brand,
-                vendor_name=VENDOR_NAME,
-                retail_price=float(product.retail_price),
-                source_url=product.source_url,
-                quantity=product.quantity,
-                is_available=product.is_available,
-            )
-            saved_count += 1
-            print(f"Saved #{item_id}: {product.name} - ${product.retail_price} / {product.quantity}")
+        saved_count += save_products(new_products, seen_urls)
 
         if parse_result.used_collection_json:
             print(f"Shopify collection JSON returned {len(products)} products on page {page}. Stopping.")
@@ -99,6 +89,44 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
         page += 1
         time.sleep(delay_seconds)
 
+    return saved_count
+
+
+def fetch_products_page(session: requests.Session, page: int) -> tuple[str, ParseResult]:
+    page_url = build_page_url(page)
+    print(f"Fetching page {page}: {page_url}")
+
+    html = fetch_html(page_url, session)
+    return html, parse_products(html, session, page)
+
+
+def dedupe_products(products: list[Product], seen_urls: set[str], page: int) -> list[Product]:
+    if not products:
+        print(f"No products found on page {page}. Stopping.")
+        return []
+
+    new_products = [product for product in products if product.source_url not in seen_urls]
+    if not new_products:
+        print(f"Page {page} contained no new products. Stopping.")
+
+    return new_products
+
+
+def save_products(products: list[Product], seen_urls: set[str]) -> int:
+    saved_count = 0
+    for product in products:
+        seen_urls.add(product.source_url)
+        item_id = save_item_data(
+            name=product.name,
+            brand=product.brand,
+            vendor_name=VENDOR_NAME,
+            retail_price=float(product.retail_price),
+            source_url=product.source_url,
+            quantity=product.quantity,
+            is_available=product.is_available,
+        )
+        saved_count += 1
+        print(f"Saved #{item_id}: {product.name} - ${product.retail_price} / {product.quantity}")
     return saved_count
 
 
@@ -170,7 +198,7 @@ def parse_products_from_collection_json(
             yield product
 
 
-def iter_shopify_products(value) -> Iterable[dict]:
+def iter_shopify_products(value: Any) -> Iterable[dict]:
     if isinstance(value, dict):
         if is_shopify_product(value):
             yield value
@@ -195,7 +223,7 @@ def product_from_shopify_dict(raw_product: dict) -> Optional[Product]:
     handle = raw_product.get("handle", "")
     variant_price = price_from_variants(raw_product.get("variants", []), name)
 
-    if not name or not handle or variant_price is None:
+    if not name or is_blacklisted_title(name) or not handle or variant_price is None:
         return None
     price, quantity = variant_price
 
@@ -227,19 +255,7 @@ def price_from_variants(variants: list[dict], product_name: str) -> Optional[tup
         if price is None:
             continue
 
-        quantity = infer_quantity(
-            " ".join(
-                str(value)
-                for value in [
-                    variant.get("title"),
-                    variant.get("option1"),
-                    variant.get("option2"),
-                    variant.get("option3"),
-                    product_name,
-                ]
-                if value
-            )
-        )
+        quantity = infer_quantity(variant_quantity_text(variant, product_name))
         fallback_options.append((price, quantity))
         if variant.get("available", True):
             available_options.append((price, quantity))
@@ -248,7 +264,28 @@ def price_from_variants(variants: list[dict], product_name: str) -> Optional[tup
     return min(options, key=lambda option: option[0]) if options else None
 
 
-def parse_price_value(value) -> Optional[Decimal]:
+def variant_quantity_text(variant: dict, product_name: str) -> str:
+    return " ".join(
+        str(value)
+        for value in [
+            variant.get("title"),
+            variant.get("option1"),
+            variant.get("option2"),
+            variant.get("option3"),
+            variant.get("sku"),
+            variant.get("barcode"),
+            product_name,
+        ]
+        if value
+    )
+
+
+def is_blacklisted_title(title: str) -> bool:
+    normalized_title = title.lower()
+    return any(term in normalized_title for term in BLACKLISTED_TITLE_TERMS)
+
+
+def parse_price_value(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
 
@@ -294,7 +331,7 @@ def find_product_cards(soup: BeautifulSoup) -> list:
     return found_cards
 
 
-def find_priced_parent(link):
+def find_priced_parent(link: Tag) -> Optional[Tag]:
     current = link
     for _ in range(8):
         if current is None:
@@ -308,17 +345,18 @@ def find_priced_parent(link):
     return None
 
 
-def parse_product_card(card) -> Optional[Product]:
+def parse_product_card(card: Tag) -> Optional[Product]:
     link = find_product_link(card)
     if link is None:
         return None
 
     name = extract_name(card, link)
     price = extract_price(card)
-    if not name or price is None:
+    if not name or is_blacklisted_title(name) or price is None:
         return None
 
     card_text = card.get_text(" ", strip=True)
+
     return Product(
         name=clean_text(name),
         brand=extract_brand(card) or infer_brand(name),
@@ -333,12 +371,12 @@ def is_sold_out_text(text: str) -> bool:
     return bool(re.search(r"\bsold\s*out\b|\bout\s*of\s*stock\b|\bunavailable\b", text, re.IGNORECASE))
 
 
-def find_product_link(card):
+def find_product_link(card: Tag) -> Optional[Tag]:
     links = card.select('a[href*="/products/"]')
     return links[0] if links else None
 
 
-def extract_name(card, link) -> str:
+def extract_name(card: Tag, link: Tag) -> str:
     selectors = [
         ".product-title",
         ".product-block__title",
@@ -358,7 +396,7 @@ def extract_name(card, link) -> str:
     return clean_text(link.get("title") or link.get_text(" ", strip=True))
 
 
-def extract_brand(card) -> Optional[str]:
+def extract_brand(card: Tag) -> Optional[str]:
     selectors = [
         ".vendor",
         ".product-vendor",
@@ -376,7 +414,7 @@ def extract_brand(card) -> Optional[str]:
     return None
 
 
-def extract_price(card) -> Optional[Decimal]:
+def extract_price(card: Tag) -> Optional[Decimal]:
     selectors = [
         ".price__current",
         ".price",
@@ -408,7 +446,9 @@ def parse_prices(text: str) -> list[Decimal]:
 
 def infer_quantity(text: str) -> int:
     patterns = [
+        r"_([0-9]{1,3})\b",
         r"\bpack\s*of\s*(\d+)\b",
+        r"\b(\d+)\s*-\s*pack\b",
         r"\b(\d+)\s*(?:switches|pcs|pieces)\b",
         r"\bx\s*(\d+)\b",
         r"\((\d+)\)",

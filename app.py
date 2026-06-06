@@ -24,12 +24,13 @@ def latest_listings_cte() -> str:
         WITH latest_listings AS (
             SELECT listing.*
             FROM Vendor_Listings listing
-            WHERE listing.date_updated = (
-                SELECT MAX(newer.date_updated)
+            WHERE listing.id = (
+                SELECT newer.id
                 FROM Vendor_Listings newer
                 WHERE newer.item_id = listing.item_id
                   AND newer.vendor_name = listing.vendor_name
-                  AND COALESCE(newer.source_url, '') = COALESCE(listing.source_url, '')
+                ORDER BY newer.date_updated DESC, newer.id DESC
+                LIMIT 1
             )
         )
     """

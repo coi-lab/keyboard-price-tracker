@@ -6,8 +6,8 @@
 - **Schema owner:** `core/core_engine.py` is the primary runtime schema and persistence layer; `create_database.py` mirrors/bootstraps the same database for manual setup.
 - **Core tables:**
   - `Keyboard_Items`: canonical switch rows with `name` and `brand`.
-  - `Vendor_Listings`: one observed vendor price row per scrape, with `retail_price`, `quantity`, computed `unit_price`, `source_url`, `date_updated`, and `is_available`.
-- **Core engine:** `save_item_data()` initializes/migrates schema, fuzzy-matches to an existing canonical item, and inserts a new vendor listing observation.
+  - `Vendor_Listings`: SCD Type 2 vendor price history with normalized `price`, `is_in_stock`, `valid_from`, `valid_to`, plus legacy/display fields `retail_price`, `quantity`, `unit_price`, `source_url`, `date_updated`, and `is_available`.
+- **Core engine:** `save_item_data()` initializes/migrates schema, fuzzy-matches to an existing canonical item, and only writes a new listing row when the active unit price or stock status changes.
 - **Matching:** Uses `thefuzz.fuzz.token_sort_ratio` at threshold `82`, after `clean_switch_name()`, with hard conflicts for protected variants, colors, explicit switch types, and trailing single-letter suffixes.
 - **HTTP/parsing:** `requests`, `BeautifulSoup`, JSON parsing where available, and a shared browser-like `USER_AGENT`.
 - **Frontend:** Flask + Jinja + vanilla HTML/CSS/JS in `templates/index.html`.
@@ -28,11 +28,11 @@
 
 ## 3. Runtime Behavior To Preserve
 - The Flask app calls `initialize_database(DB_PATH)` at startup and serves `switch_prices.db`.
-- `/` renders the latest listing per item/vendor/source via a `latest_listings` CTE, then orders available switches first.
+- `/` renders active listings with `valid_to IS NULL`, then orders available switches first.
 - `/api/switch/<id>` returns the canonical switch plus latest vendor listings sorted by availability, unit price, pack price, and vendor name.
-- `Vendor_Listings` is append-only scrape history. UI queries should collapse to the latest row per `item_id` and `vendor_name`.
-- Each switch should have at most one current listing per scraped website/vendor. Daily history should keep one row per `item_id + vendor_name + date_updated`; if a scraper reruns the same day, update that row instead of inserting another link for the same vendor.
-- Preserve price observations even when a listing is sold out. The long-term product goal is price tracking and prediction, so availability should be stored as `is_available`, not used as a reason to discard a valid price row.
+- `Vendor_Listings` is SCD Type 2 history. UI/live-price queries must filter `valid_to IS NULL`; historical analysis can include closed rows where `valid_to IS NOT NULL`.
+- Each switch should have at most one active listing per scraped website/vendor. If a scraper reruns with the same normalized unit price and stock status, `save_item_data()` skips the write. If either changes, it closes the old row with `valid_to = CURRENT_DATE` and inserts a new active row with `valid_from = CURRENT_DATE`.
+- Preserve price observations even when a listing is sold out. The long-term product goal is price tracking and prediction, so availability should be stored as both current `is_in_stock`/legacy `is_available`, not used as a reason to discard a valid price row.
 - `unit_price` is always `retail_price / quantity`; scrapers should preserve pack quantities so cross-vendor comparison is meaningful.
 - `is_available` is an integer boolean (`0` or `1`). Available listings should sort ahead of sold-out listings, but sold-out prices may still be retained for context.
 
@@ -70,7 +70,7 @@
 - [Core Engine] HMX `Retro J`, `Retro C`, `Retro R`, and `Retro T` need standalone trailing single-letter suffixes treated as protected identifiers.
 - [Core Engine] Explicit switch type conflicts matter. Names like `Oil King Silent Tactile` and `Oil King Silent Linear` may score similarly after sanitizer cleanup, so compare explicit `linear`/`tactile`/`clicky` tags before accepting a fuzzy match.
 - [Schema] The active database file is `switch_prices.db`; stale instructions naming `keyboard_prices.db` should be ignored.
-- [Schema] `Vendor_Listings` stores dated observations and availability, not just current prices. App queries should use a latest-listings CTE rather than assuming one row per vendor.
+- [Schema] `Vendor_Listings` uses SCD Type 2 effective dating. Active/live rows have `valid_to IS NULL`; old rows are closed with `valid_to` instead of being overwritten or deleted.
 - [Frontend] The live UI is no longer the old pastel cloud theme. Preserve the current compact neutral/purple master-detail style unless the user explicitly asks for a redesign.
 - [Scrapers] Scraper parsing is intentionally vendor-specific. Structured JSON should be preferred when present, but each vendor has different endpoints and fallbacks.
 - [Kinetic Labs] Scraped product paths can be relative; normalize every extracted path with `urljoin("https://kineticlabs.com", href)` unless it already starts with `http`.
@@ -88,4 +88,5 @@
 - [KBDFans] Product specs can express pack size as `35 per unit` rather than `pcs`, `pieces`, or `pack`. Treat `unit` as quantity context and parse `(\d+) per unit`; otherwise the scraper can accidentally pick noisy quantity dropdown values like `8`.
 - [Product Philosophy] The website is meant to build historical price intelligence and future price prediction. Scrapers should preserve unavailable/sold-out listings as observations whenever the price data is trustworthy; filtering should happen in the UI/query layer, not by dropping history at scrape time.
 - [Code Quality] Core and scraper functions should follow the master directive's anti-slop rules: explicit type hints, guard clauses, descriptive boolean names, and small single-responsibility functions. Use typed helpers for repeated scrape-loop work such as page fetch, URL dedupe, normalization, and saving.
-- [Schema] A switch should not show multiple links from the same vendor. `Vendor_Listings` is unique per `item_id`, `vendor_name`, and `date_updated`; app queries collapse latest listings by item/vendor, not item/vendor/source URL.
+- [Schema] A switch should not show multiple active links from the same vendor. `Vendor_Listings` has a partial unique index on active `(item_id, vendor_name)` rows where `valid_to IS NULL`; app queries filter active rows rather than collapsing by date/source URL.
+- [Database Automation] The SCD `price` column stores normalized unit price (`retail_price / quantity`) for change detection and forecasting. Keep `retail_price`, `quantity`, and `unit_price` populated for display/backward compatibility while automation transitions to `price`, `is_in_stock`, `valid_from`, and `valid_to`.

@@ -24,14 +24,7 @@ def latest_listings_cte() -> str:
         WITH latest_listings AS (
             SELECT listing.*
             FROM Vendor_Listings listing
-            WHERE listing.id = (
-                SELECT newer.id
-                FROM Vendor_Listings newer
-                WHERE newer.item_id = listing.item_id
-                  AND newer.vendor_name = listing.vendor_name
-                ORDER BY newer.date_updated DESC, newer.id DESC
-                LIMIT 1
-            )
+            WHERE listing.valid_to IS NULL
         )
     """
 
@@ -91,7 +84,7 @@ def switch_detail(item_id: int):
                 quantity,
                 unit_price,
                 source_url,
-                date_updated,
+                valid_from AS date_updated,
                 is_available
             FROM latest_listings
             WHERE item_id = ?

@@ -6,9 +6,6 @@ from pathlib import Path
 from typing import Optional
 import time
 import requests
-from requests.exceptions import RequestException
-
-import requests
 from thefuzz import fuzz
 
 
@@ -176,16 +173,16 @@ def initialize_database(db_path: Path = DB_PATH) -> None:
         raise RuntimeError(f"Could not initialize database at {db_path}: {error}") from error
 
 
-def fetch_html(url: str, session: requests.Session, max_retries: int = 3) -> str | None:
+def fetch_html(url: str, session: requests.Session, max_retries: int = 3) -> str:
     """Fetches HTML with exponential backoff for 429 Too Many Requests errors."""
     if not url:
-        return None
+        raise RuntimeError("Cannot fetch an empty URL")
 
     base_delay = 3.0  # Start with a 3-second delay on failure
 
     for attempt in range(max_retries):
         try:
-            response = session.get(url, timeout=10)
+            response = session.get(url, timeout=REQUEST_TIMEOUT)
             
             # If successful, return the text immediately
             if response.status_code == 200:
@@ -193,7 +190,7 @@ def fetch_html(url: str, session: requests.Session, max_retries: int = 3) -> str
                 
             # If rate-limited, trigger exponential backoff
             if response.status_code == 429:
-                wait_time = base_delay * (2 ** attempt)
+                wait_time = retry_after_seconds(response) or base_delay * (2 ** attempt)
                 print(f"[429 Rate Limit] Pausing for {wait_time}s before retrying {url}...")
                 time.sleep(wait_time)
                 continue
@@ -201,12 +198,23 @@ def fetch_html(url: str, session: requests.Session, max_retries: int = 3) -> str
             # Handle other HTTP errors (e.g., 404 Not Found)
             response.raise_for_status()
 
-        except RequestException as e:
+        except requests.RequestException as e:
             print(f"[Fetch Error] Attempt {attempt + 1}/{max_retries} failed for {url}: {e}")
             time.sleep(base_delay)
             
     print(f"❌ Failed to fetch {url} after {max_retries} attempts.")
-    return None
+    raise RuntimeError(f"Could not fetch {url} after {max_retries} attempts.")
+
+
+def retry_after_seconds(response: requests.Response) -> Optional[float]:
+    retry_after = response.headers.get("Retry-After")
+    if retry_after is None:
+        return None
+
+    try:
+        return float(retry_after)
+    except ValueError:
+        return None
 
 
 def clean_text(text: str) -> str:

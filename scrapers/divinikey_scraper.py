@@ -74,7 +74,12 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
             page_url = build_page_url(page, availability_filter)
             print(f"Fetching {availability_label} page {page}: {page_url}")
 
-            html = fetch_html(page_url, session)
+            try:
+                html = fetch_html(page_url, session)
+            except RuntimeError as error:
+                print(f"Could not fetch {availability_label} page {page}: {error}")
+                break
+
             products = list(parse_products(html))
 
             if not products:
@@ -583,7 +588,7 @@ def enrich_product_from_product_json(product: Product, session: requests.Session
 def enrich_quantity_from_product_page(product: Product, session: requests.Session) -> Product:
     try:
         html = fetch_html(product.source_url, session)
-    except requests.RequestException:
+    except RuntimeError:
         return product
 
     native_unit_price = extract_native_unit_price(html)

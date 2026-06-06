@@ -79,7 +79,10 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
         saved_count += save_products(new_products, seen_urls)
 
         if parse_result.used_collection_json:
-            print(f"Shopify collection JSON returned {len(products)} products on page {page}. Stopping.")
+            print(
+                f"Shopify collection JSON returned "
+                f"{len(parse_result.products)} products on page {page}. Stopping."
+            )
             break
 
         if not has_next_page(html, page):

@@ -20,7 +20,7 @@
 - Run a scraper: `python scrapers/[filename].py`
 - Test a scraper quickly: `python scrapers/[filename].py --max-pages 1 --delay 0`
 - Known scrapers:
-  - `python scrapers/kdbfans_scraper.py --max-pages 1 --delay 0`
+  - `python scrapers/kbdfans_scraper.py --max-pages 1 --delay 0`
   - `python -m scrapers.kineticlabs_scraper --max-pages 1 --delay 0`
   - `python scrapers/cannonkeys_scraper.py --max-pages 1 --delay 0`
   - `python scrapers/divinikey_scraper.py --max-pages 1 --delay 0`
@@ -84,6 +84,7 @@
 - [Core Engine] Variant matching now uses a mutually exclusive category dictionary for switch types, versions, materials/themes, and colors. Version terms conflict when one side differs or lacks the version; other categories conflict when both names contain different leftover terms after shared category terms are removed.
 - [CannonKeys] Do not skip sold-out products. JSON variants with `available == false` and HTML cards containing `Sold Out`, `Out of Stock`, or `Unavailable` should still be saved with `is_available=0` so price history remains complete.
 - [CannonKeys] Quantity can be embedded in SKU-like strings, e.g. `OA_SWITCH_110`; include `sku`/`barcode` fields in variant quantity inference before defaulting to one.
+- [CannonKeys] `scrape_switch_collection()` works through a `ParseResult`; when logging collection JSON counts, use `len(parse_result.products)` rather than an out-of-scope `products` variable.
 - [Divinikey] Product `.js` JSON can omit pack size even when the product page HTML/title contains it, e.g. `(18 Pack)` or `18 included in each pack`. If JSON enrichment still leaves quantity at `1`, fetch the product page HTML and infer quantity from the page text/native unit price.
 - [Divinikey] Collection pagination is sensitive to rapid requests. Keep a fixed `2.5` second sleep at the end of each pagination loop even when test commands pass `--delay 0`, or the site may kick off the scraper.
 - [Scrapers] Treat HTTP `429 Too Many Requests` as a retryable client error. Use exponential backoff and honor `Retry-After` headers before failing, especially for hosted daily automation where a single fast pagination loop can poison the run.
@@ -93,3 +94,4 @@
 - [Code Quality] Core and scraper functions should follow the master directive's anti-slop rules: explicit type hints, guard clauses, descriptive boolean names, and small single-responsibility functions. Use typed helpers for repeated scrape-loop work such as page fetch, URL dedupe, normalization, and saving.
 - [Schema] A switch should not show multiple active links from the same vendor. `Vendor_Listings` has a partial unique index on active `(item_id, vendor_name)` rows where `valid_to IS NULL`; app queries filter active rows rather than collapsing by date/source URL.
 - [Database Automation] The SCD `price` column stores normalized unit price (`retail_price / quantity`) for change detection and forecasting. Keep `retail_price`, `quantity`, and `unit_price` populated for display/backward compatibility while automation transitions to `price`, `is_in_stock`, `valid_from`, and `valid_to`.
+- [GitHub Actions] Daily scraper automation must run `scrapers/kbdfans_scraper.py` and commit `switch_prices.db`; the old names `kdbfans_scraper.py` and `keyboard_prices.db` are stale and will break or noop automation.

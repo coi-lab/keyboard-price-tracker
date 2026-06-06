@@ -55,6 +55,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add keyboard_prices.db
+          git add switch_prices.db
           # Only commit if there are actually changes to the DB
           git diff --quiet && git diff --staged --quiet || (git commit -m "Automated database update: Daily scrape" && git push)

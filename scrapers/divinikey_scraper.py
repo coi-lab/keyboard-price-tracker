@@ -30,6 +30,8 @@ COLLECTION_URL = f"{BASE_URL}/collections/switches"
 DEFAULT_BRAND = "Divinikey"
 VENDOR_NAME = "Divinikey"
 PAGINATION_DELAY_SECONDS = 2.5
+MIN_REASONABLE_UNIT_PRICE = Decimal("0.15")
+MAX_REASONABLE_UNIT_PRICE = Decimal("1.50")
 BLACKLISTED_TITLE_TERMS = [
     "sample pack",
     "tester pack",
@@ -102,6 +104,13 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
                     is_available=availability_filter == 1,
                 )
                 seen_urls.add(product.source_url)
+                if not has_reasonable_unit_price(product):
+                    print(
+                        "Skipping implausible Divinikey unit price: "
+                        f"{product.name} - ${product.retail_price} / {product.quantity}"
+                    )
+                    continue
+
                 item_id = save_item_data(
                     name=product.name,
                     brand=product.brand,
@@ -122,6 +131,11 @@ def scrape_switch_collection(delay_seconds: float = 2.0, max_pages: Optional[int
             time.sleep(PAGINATION_DELAY_SECONDS)
 
     return saved_count
+
+
+def has_reasonable_unit_price(product: Product) -> bool:
+    unit_price = product.retail_price / Decimal(product.quantity)
+    return MIN_REASONABLE_UNIT_PRICE <= unit_price <= MAX_REASONABLE_UNIT_PRICE
 
 
 def build_page_url(page: int, availability_filter: Optional[int] = None) -> str:

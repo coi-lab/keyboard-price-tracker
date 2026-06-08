@@ -103,5 +103,59 @@ def switch_detail(item_id: int):
     )
 
 
+@app.route("/api/history/<int:item_id>")
+def price_history(item_id: int):
+    with get_connection() as connection:
+        item = connection.execute(
+            """
+            SELECT id, name, brand
+            FROM Keyboard_Items
+            WHERE id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+
+        if item is None:
+            return jsonify({"error": "Switch not found"}), 404
+
+        rows = connection.execute(
+            """
+            SELECT
+                vendor_name,
+                price,
+                valid_from,
+                valid_to,
+                is_in_stock
+            FROM Vendor_Listings
+            WHERE item_id = ?
+            ORDER BY vendor_name COLLATE NOCASE, valid_from ASC, id ASC
+            """,
+            (item_id,),
+        ).fetchall()
+
+    return jsonify(
+        {
+            "id": item["id"],
+            "name": item["name"],
+            "brand": item["brand"],
+            "vendors": group_history_by_vendor(rows),
+        }
+    )
+
+
+def group_history_by_vendor(rows: list[sqlite3.Row]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        grouped.setdefault(row["vendor_name"], []).append(
+            {
+                "price": row["price"],
+                "valid_from": row["valid_from"],
+                "valid_to": row["valid_to"],
+                "is_in_stock": bool(row["is_in_stock"]),
+            }
+        )
+    return grouped
+
+
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)

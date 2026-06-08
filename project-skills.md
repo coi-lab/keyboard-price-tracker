@@ -56,8 +56,9 @@
 ## 6. Frontend Notes
 - The list supports search, sorting, sold-out styling, and localStorage-backed pinning.
 - Detail data is loaded asynchronously from `/api/switch/<id>`.
+- Historical price data is loaded asynchronously from `/api/history/<id>` and grouped by vendor for Chart.js.
 - Vendor cards render pack price, unit price, quantity, availability, date, and source links.
-- `#price-history-chart` is reserved in the detail pane for future history visualization.
+- The detail pane uses tabs for live vendor cards and historical trends. Historical charts use stepped Chart.js line datasets based on SCD `price`, `valid_from`, `valid_to`, and `is_in_stock`.
 - No product image scraping is currently used; brand/vendor avatars are text initials.
 
 ## 7. Agent Learnings Log (AI: UPDATE THIS ACTIVELY)
@@ -97,3 +98,5 @@
 - [Schema] A switch should not show multiple active links from the same vendor. `Vendor_Listings` has a partial unique index on active `(item_id, vendor_name)` rows where `valid_to IS NULL`; app queries filter active rows rather than collapsing by date/source URL.
 - [Database Automation] The SCD `price` column stores normalized unit price (`retail_price / quantity`) for change detection and forecasting. Keep `retail_price`, `quantity`, and `unit_price` populated for display/backward compatibility while automation transitions to `price`, `is_in_stock`, `valid_from`, and `valid_to`.
 - [GitHub Actions] Daily scraper automation must run `scrapers/kbdfans_scraper.py` and commit `switch_prices.db`; the old names `kdbfans_scraper.py` and `keyboard_prices.db` are stale and will break or noop automation.
+- [Frontend] Historical charts live in the switch detail pane behind the Historical Trends tab. Use `/api/history/<id>` grouped by vendor, Chart.js stepped line datasets, and dashed/lower-opacity segments when either side of a segment is out of stock.
+- [Frontend] Preserve the user's active detail tab when selecting another switch. If Historical Trends is active, switching rows should keep the graph tab open and reload the new switch's history instead of snapping back to Live Prices.

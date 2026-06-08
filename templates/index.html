@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MechKeyWatcher</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     :root {
       --page: #f4f4f2;
@@ -344,6 +345,56 @@
       overflow-y: auto;
     }
 
+    .detail-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 10px 10px 0;
+      background: var(--purple-900);
+    }
+
+    .detail-tab {
+      min-height: 34px;
+      border: 1px solid rgba(217, 200, 240, 0.22);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--purple-300);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .detail-tab.active,
+    .detail-tab:hover {
+      background: var(--purple-300);
+      color: var(--purple-950);
+    }
+
+    .tab-panel {
+      min-height: 0;
+      flex: 1 1 auto;
+      overflow: hidden;
+    }
+
+    .chart-panel {
+      padding: 10px;
+    }
+
+    .chart-shell {
+      position: relative;
+      height: 320px;
+      border: 1px solid rgba(217, 200, 240, 0.18);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      padding: 10px;
+    }
+
+    .chart-message {
+      margin: 10px 0 0;
+      color: var(--purple-300);
+      font-size: 12px;
+    }
+
     .vendor-card {
       border: 1px solid rgba(217, 200, 240, 0.18);
       border-radius: 6px;
@@ -408,14 +459,6 @@
 
     .vendor-link:hover {
       background: var(--white);
-    }
-
-    #price-history-chart {
-      min-height: 64px;
-      margin: 0 10px 10px;
-      border: 1px dashed rgba(217, 200, 240, 0.28);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.04);
     }
 
     .hidden {
@@ -537,8 +580,19 @@
             <span id="detail-brand"></span>
           </div>
         </header>
-        <div id="detail-listings" class="listings"></div>
-        <div id="price-history-chart"></div>
+        <div class="detail-tabs" role="tablist" aria-label="Switch detail views">
+          <button id="live-tab" class="detail-tab active" type="button" role="tab" aria-selected="true" aria-controls="live-panel">Live Prices</button>
+          <button id="history-tab" class="detail-tab" type="button" role="tab" aria-selected="false" aria-controls="history-panel">Historical Trends</button>
+        </div>
+        <div id="live-panel" class="tab-panel" role="tabpanel" aria-labelledby="live-tab">
+          <div id="detail-listings" class="listings"></div>
+        </div>
+        <div id="history-panel" class="tab-panel chart-panel hidden" role="tabpanel" aria-labelledby="history-tab">
+          <div class="chart-shell">
+            <canvas id="priceChart"></canvas>
+          </div>
+          <p id="chart-message" class="chart-message"></p>
+        </div>
       </article>
     </aside>
   </main>
@@ -556,7 +610,17 @@
     const detailBrand = document.querySelector("#detail-brand");
     const detailAvatar = document.querySelector("#detail-avatar");
     const detailListings = document.querySelector("#detail-listings");
+    const liveTab = document.querySelector("#live-tab");
+    const historyTab = document.querySelector("#history-tab");
+    const livePanel = document.querySelector("#live-panel");
+    const historyPanel = document.querySelector("#history-panel");
+    const chartCanvas = document.querySelector("#priceChart");
+    const chartMessage = document.querySelector("#chart-message");
     const pinnedSwitches = new Set(JSON.parse(localStorage.getItem("pinnedSwitches") || "[]"));
+    let activeSwitchId = null;
+    let activeDetailTab = "live";
+    let priceChart = null;
+    let hasLoadedHistoryForSwitch = false;
 
     const money = new Intl.NumberFormat("en-US", {
       style: "currency",
@@ -570,6 +634,15 @@
     sortSelect.addEventListener("change", () => {
       sortRows();
       filterRows();
+    });
+
+    liveTab.addEventListener("click", () => {
+      activateDetailTab("live");
+    });
+
+    historyTab.addEventListener("click", async () => {
+      activateDetailTab("history");
+      await loadHistoryForActiveSwitch();
     });
 
     buttons.forEach((button) => {
@@ -690,12 +763,17 @@
     }
 
     async function loadSwitch(id) {
+      activeSwitchId = id;
+      hasLoadedHistoryForSwitch = false;
       detailListings.innerHTML = "";
       detailTitle.textContent = "Loading...";
       detailBrand.textContent = "";
       detailAvatar.textContent = "";
+      chartMessage.textContent = "";
       emptyState.classList.add("hidden");
       detailCard.classList.add("open");
+      activateDetailTab(activeDetailTab);
+      destroyPriceChart();
 
       const response = await fetch(`/api/switch/${id}`);
       if (!response.ok) {
@@ -710,6 +788,178 @@
       detailListings.innerHTML = data.listings.length
         ? data.listings.map(renderListing).join("")
         : `<div class="vendor-card">No current vendor prices found.</div>`;
+
+      if (activeDetailTab === "history") {
+        await loadHistoryForActiveSwitch();
+      }
+    }
+
+    function activateDetailTab(tabName) {
+      activeDetailTab = tabName;
+      const isHistoryTab = tabName === "history";
+      liveTab.classList.toggle("active", !isHistoryTab);
+      historyTab.classList.toggle("active", isHistoryTab);
+      liveTab.setAttribute("aria-selected", String(!isHistoryTab));
+      historyTab.setAttribute("aria-selected", String(isHistoryTab));
+      livePanel.classList.toggle("hidden", isHistoryTab);
+      historyPanel.classList.toggle("hidden", !isHistoryTab);
+    }
+
+    async function loadHistoryForActiveSwitch() {
+      if (!activeSwitchId || hasLoadedHistoryForSwitch) {
+        return;
+      }
+
+      chartMessage.textContent = "Loading history...";
+      const response = await fetch(`/api/history/${activeSwitchId}`);
+      if (!response.ok) {
+        chartMessage.textContent = "Price history unavailable.";
+        return;
+      }
+
+      const data = await response.json();
+      renderPriceChart(data.vendors || {});
+      hasLoadedHistoryForSwitch = true;
+    }
+
+    function renderPriceChart(vendors) {
+      const datasets = buildHistoryDatasets(vendors);
+      if (!datasets.length) {
+        destroyPriceChart();
+        chartMessage.textContent = "No historical price data found.";
+        return;
+      }
+
+      chartMessage.textContent = "";
+      destroyPriceChart();
+      priceChart = new Chart(chartCanvas, {
+        type: "line",
+        data: {
+          datasets
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {
+            mode: "nearest",
+            intersect: false
+          },
+          parsing: {
+            xAxisKey: "x",
+            yAxisKey: "y"
+          },
+          scales: {
+            x: {
+              type: "category",
+              ticks: {
+                color: "#d9c8f0",
+                maxRotation: 0,
+                autoSkip: true
+              },
+              grid: {
+                color: "rgba(217, 200, 240, 0.12)"
+              }
+            },
+            y: {
+              beginAtZero: true,
+              ticks: {
+                color: "#d9c8f0",
+                callback: (value) => money.format(Number(value))
+              },
+              grid: {
+                color: "rgba(217, 200, 240, 0.12)"
+              }
+            }
+          },
+          plugins: {
+            legend: {
+              labels: {
+                color: "#ffffff",
+                boxWidth: 12,
+                boxHeight: 12
+              }
+            },
+            tooltip: {
+              callbacks: {
+                label: (context) => {
+                  const point = context.raw || {};
+                  const stockText = point.is_in_stock ? "in stock" : "sold out";
+                  return `${context.dataset.label}: ${money.format(Number(point.y))} (${stockText})`;
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+
+    function buildHistoryDatasets(vendors) {
+      return Object.entries(vendors).map(([vendorName, rows], index) => {
+        const color = chartColor(index);
+        return {
+          label: vendorName,
+          data: buildStepPoints(rows),
+          borderColor: color,
+          backgroundColor: color,
+          pointRadius: 3,
+          pointHoverRadius: 5,
+          tension: 0,
+          stepped: true,
+          spanGaps: true,
+          segment: {
+            borderDash: (context) => context.p0.raw?.is_in_stock && context.p1.raw?.is_in_stock ? [] : [6, 5],
+            borderColor: (context) => context.p0.raw?.is_in_stock && context.p1.raw?.is_in_stock
+              ? color
+              : transparentColor(color)
+          }
+        };
+      }).filter((dataset) => dataset.data.length);
+    }
+
+    function buildStepPoints(rows) {
+      const points = [];
+      rows.forEach((row) => {
+        if (!row.valid_from || row.price === null) {
+          return;
+        }
+
+        points.push({
+          x: row.valid_from,
+          y: Number(row.price),
+          is_in_stock: Boolean(row.is_in_stock)
+        });
+
+        if (row.valid_to) {
+          points.push({
+            x: row.valid_to,
+            y: Number(row.price),
+            is_in_stock: Boolean(row.is_in_stock)
+          });
+        }
+      });
+      return points;
+    }
+
+    function destroyPriceChart() {
+      if (!priceChart) {
+        return;
+      }
+
+      priceChart.destroy();
+      priceChart = null;
+    }
+
+    function chartColor(index) {
+      const colors = ["#d9c8f0", "#ffea00", "#8bd3ff", "#ff9f9f", "#99f0c8", "#f6b6ff"];
+      return colors[index % colors.length];
+    }
+
+    function transparentColor(color) {
+      const hex = color.replace("#", "");
+      const red = parseInt(hex.slice(0, 2), 16);
+      const green = parseInt(hex.slice(2, 4), 16);
+      const blue = parseInt(hex.slice(4, 6), 16);
+      return `rgba(${red}, ${green}, ${blue}, 0.45)`;
     }
 
     function renderListing(listing) {

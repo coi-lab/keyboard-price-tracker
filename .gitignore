@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 keyboard_prices.db
+*.local-backup-*.db
 .venv/
 node_modules/

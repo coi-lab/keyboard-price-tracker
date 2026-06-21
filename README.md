@@ -136,9 +136,12 @@ The project currently includes working application structure for:
 
 The database file `switch_prices.db` is included in the project workspace and is used by the local app.
 
+Development will continue after more keyboard pricing data has been collected. The current database is useful for testing the scraping, normalization, and dashboard flow, but longer-running historical data is needed before deeper trend analysis or price prediction work would be meaningful.
+
 ## Roadmap
 
 - [ ] Continue improving vendor-specific scraping reliability
+- [ ] Collect more historical keyboard pricing data over time
 - [ ] Add stronger validation for scraped prices, quantities, and stock status
 - [ ] Improve matching rules for similarly named switch variants
 - [ ] Add tests for core matching, normalization, and database update behavior

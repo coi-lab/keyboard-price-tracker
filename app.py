@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template
@@ -8,6 +9,7 @@ from core.core_engine import initialize_database
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DB_PATH = PROJECT_ROOT / "switch_prices.db"
+MAX_CHART_UNIT_PRICE = 2.00
 
 app = Flask(__name__)
 initialize_database(DB_PATH)
@@ -48,7 +50,8 @@ def index():
                     MIN(listing.retail_price)
                 ) AS lowest_pack_price,
                 COUNT(listing.id) AS listing_count,
-                COALESCE(MAX(listing.is_available), 0) AS is_available
+                COALESCE(MAX(listing.is_available), 0) AS is_available,
+                MAX(listing.valid_from) AS latest_change_date
             FROM Keyboard_Items item
             LEFT JOIN latest_listings listing
                 ON listing.item_id = item.id
@@ -124,13 +127,17 @@ def price_history(item_id: int):
                 vendor_name,
                 price,
                 valid_from,
-                valid_to,
+                COALESCE(valid_to, ?) AS valid_to,
                 is_in_stock
             FROM Vendor_Listings
             WHERE item_id = ?
+              AND price > 0
+              AND unit_price > 0
+              AND price <= ?
+              AND unit_price <= ?
             ORDER BY vendor_name COLLATE NOCASE, valid_from ASC, id ASC
             """,
-            (item_id,),
+            (date.today().isoformat(), item_id, MAX_CHART_UNIT_PRICE, MAX_CHART_UNIT_PRICE),
         ).fetchall()
 
     return jsonify(

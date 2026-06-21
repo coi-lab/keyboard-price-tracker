@@ -515,6 +515,8 @@
             <option value="price-asc">Lowest price</option>
             <option value="price-desc">Highest price</option>
             <option value="vendors-desc">Most vendors</option>
+            <option value="change-desc">Newest price change</option>
+            <option value="change-asc">Oldest price change</option>
           </select>
         </div>
       </header>
@@ -528,6 +530,7 @@
             data-price="{% if switch.lowest_unit_price is not none %}{{ switch.lowest_unit_price }}{% else %}999999{% endif %}"
             data-has-price="{% if switch.lowest_unit_price is not none %}true{% else %}false{% endif %}"
             data-vendors="{{ switch.listing_count or 0 }}"
+            data-latest-change="{{ switch.latest_change_date or '' }}"
             data-available="{% if switch.is_available %}true{% else %}false{% endif %}"
             data-pinned="false"
             data-switch-id="{{ switch.id }}"
@@ -745,6 +748,14 @@
         return Number(b.dataset.vendors) - Number(a.dataset.vendors) || compareName(a, b);
       }
 
+      if (sortSelect.value === "change-desc") {
+        return compareLatestChange(b, a) || compareName(a, b);
+      }
+
+      if (sortSelect.value === "change-asc") {
+        return compareLatestChange(a, b) || compareName(a, b);
+      }
+
       return compareName(a, b);
     }
 
@@ -754,6 +765,25 @@
 
     function comparePriceAvailability(a, b) {
       return Number(b.dataset.hasPrice === "true") - Number(a.dataset.hasPrice === "true");
+    }
+
+    function compareLatestChange(a, b) {
+      const aDate = a.dataset.latestChange || "";
+      const bDate = b.dataset.latestChange || "";
+
+      if (!aDate && !bDate) {
+        return 0;
+      }
+
+      if (!aDate) {
+        return 1;
+      }
+
+      if (!bDate) {
+        return -1;
+      }
+
+      return aDate.localeCompare(bDate);
     }
 
     async function selectSwitch(button) {
@@ -918,26 +948,49 @@
 
     function buildStepPoints(rows) {
       const points = [];
-      rows.forEach((row) => {
+      const sortedRows = [...rows].sort((a, b) => {
+        const dateComparison = String(a.valid_from || "").localeCompare(String(b.valid_from || ""));
+        if (dateComparison !== 0) {
+          return dateComparison;
+        }
+
+        return Number(a.price) - Number(b.price);
+      });
+
+      sortedRows.forEach((row) => {
         if (!row.valid_from || row.price === null) {
           return;
         }
 
-        points.push({
+        const price = Number(row.price);
+        if (!Number.isFinite(price) || price <= 0) {
+          return;
+        }
+
+        addChartPoint(points, {
           x: row.valid_from,
-          y: Number(row.price),
+          y: price,
           is_in_stock: Boolean(row.is_in_stock)
         });
 
         if (row.valid_to) {
-          points.push({
+          addChartPoint(points, {
             x: row.valid_to,
-            y: Number(row.price),
+            y: price,
             is_in_stock: Boolean(row.is_in_stock)
           });
         }
       });
       return points;
+    }
+
+    function addChartPoint(points, point) {
+      const previous = points[points.length - 1];
+      if (previous && previous.x === point.x && previous.y === point.y && previous.is_in_stock === point.is_in_stock) {
+        return;
+      }
+
+      points.push(point);
     }
 
     function destroyPriceChart() {
